@@ -1,0 +1,43 @@
+[project]
+name = "uglycat-os"
+version = "0.1.0"
+description = "每日新闻解读助手：公开新闻抓取 → 官方措辞解读 → 普通人一句话建议"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "typer>=0.12.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "litellm>=1.40.0,<1.92",
+    "httpx>=0.27.0",
+    "feedparser>=6.0.0,<6.0.3",
+    "selectolax>=0.3.0",
+    "apscheduler>=3.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["family_os*"]
+
+[tool.setuptools.package-data]
+"family_os" = ["**/*.yaml", "**/*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not network'"
+markers = [
+    "network: 需联网的测试（默认跳过，用 `pytest -m network` 显式运行）",
+]

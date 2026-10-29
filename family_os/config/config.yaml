@@ -1,0 +1,71 @@
+app:
+  name: "UglyCat OS"
+  data_dir: "./data"
+  log_dir: "./logs"
+  prompt_dir: "./prompts"
+
+plugins:
+  enabled:
+    - news_digest
+  auto_discover: true
+  plugin_dir: "family_os/plugins"
+  instances:
+    news_digest:
+      enabled: true
+      # 每天 08:00（APScheduler 约定：0=周一 .. 6=周日）
+      schedule: "0 8 * * *"
+      # 群名仅用于通知路由；Server酱 的 mirror_groups 与此对应
+      notify_on: [family]
+
+llm:
+  # 默认走智谱免费模型（注册即可用，标价 0）
+  default_model: "glm-4.7-flash"
+  reasoning_model: "glm-4.7-flash"
+  monthly_budget_usd: 0.0
+  providers:
+    zhipu:
+      base_url: "https://open.bigmodel.cn/api/paas/v4"
+      api_key_env: "ZHIPU_API_KEY"
+    siliconflow:
+      base_url: "https://api.siliconflow.cn/v1"
+      api_key_env: "SILICONFLOW_API_KEY"
+  news_digest_model: "glm-4.7-flash"
+  news_digest_fallback_models:
+    - "glm-4-flash-250414"
+    - "Qwen/Qwen3-8B"
+  model_pricing:
+    "glm-4.7-flash":
+      prompt_per_1m: 0.0
+      completion_per_1m: 0.0
+    "glm-4-flash-250414":
+      prompt_per_1m: 0.0
+      completion_per_1m: 0.0
+    "Qwen/Qwen3-8B":
+      prompt_per_1m: 0.0
+      completion_per_1m: 0.0
+
+scheduler:
+  backend: "apscheduler"
+  timezone: "Asia/Shanghai"
+
+notifier:
+  channels:
+    # 默认写本地文件：data/inbox/*.md
+    - type: "file"
+      enabled: true
+    # 默认开启：只要 .env 里填了 SERVERCHAN_SENDKEY 就会推微信；
+    # 没填则自动跳过（只写本地文件），不影响运行
+    - type: "serverchan"
+      enabled: true
+      mirror_groups: [family]
+      sendkey_env: "SERVERCHAN_SENDKEY"
+      title_max_chars: 32
+      max_desp_bytes: 20000
+
+digest:
+  schedule: "0 8 * * *"
+  mode: "daily"
+
+approval:
+  auto_approve_free: true
+  require_approval_for: []

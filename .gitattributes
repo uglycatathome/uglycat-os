@@ -1,0 +1,9 @@
+# 仓库内统一 LF，检出时按平台转换；保证跨平台 diff 干净
+* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
