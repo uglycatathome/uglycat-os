@@ -1,5 +1,9 @@
 # UglyCat OS
 
+[![CI](https://github.com/uglycatathome/uglycat-os/actions/workflows/ci.yml/badge.svg)](https://github.com/uglycatathome/uglycat-os/actions/workflows/ci.yml)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+
 一个跑在你自己电脑上的**每日新闻解读助手**：抓取公开新闻源 → 语义去重 → 只留国家级大事 →
 解读官方措辞变化 → 给普通人一句可执行的建议 → 通过 Server酱 推到你微信。
 
