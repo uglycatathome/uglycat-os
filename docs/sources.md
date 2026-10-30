@@ -11,7 +11,7 @@
 
 ```yaml
 sources:
-  - name: 某部委
+  - name: 某机构
     category: policy
     type: rss                      # rss | web_list | web_page
     url: https://example.gov.cn/rss.xml
@@ -25,7 +25,7 @@ sources:
 |---|---|
 | `type` | `rss`（标准订阅源）；`web_list`（列表页 HTML，需 `link_pattern`）；`web_page`（单页正文） |
 | `link_pattern` | `web_list` 必填，用正则从列表页提取文章链接 |
-| `title_include` | 只保留标题包含该词的文章（如「国务院」「印发」），用来压噪 |
+| `title_include` | 只保留标题包含该词的文章（如「通知」「公布」），用来压噪 |
 | `max_age_days` | 只抓最近 N 天（默认 2~3，避免旧文混入） |
 | `weight` | 排序权重，`0.9` 用于最高优先级源（社科院、求是等） |
 | `category` | 仅作分组展示，不影响筛选 |
@@ -39,7 +39,7 @@ sources:
 2. 在 `sources.local.yaml` 追加条目（保持缩进，`enabled: true`）；若文件不存在，新建即可：
    ```yaml
    sources:
-     - name: 某部委
+     - name: 某机构
        type: rss
        url: https://example.gov.cn/rss.xml
        enabled: true
