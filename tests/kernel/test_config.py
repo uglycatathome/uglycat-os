@@ -129,8 +129,7 @@ class TestConfigLoad:
         assert config.llm.budget_warn_threshold == 0.8
         assert config.llm.budget_cutoff_threshold == 1.0
         # 模型链字段：sample 未配置 → 应用默认值
-        assert config.llm.strategy_radar_model == "Qwen/Qwen3-8B"
-        assert config.llm.strategy_radar_fallback_models == []
+        assert config.llm.news_digest_model == "Qwen/Qwen3-8B"
 
         # scheduler section
         assert config.scheduler.backend == "apscheduler"
@@ -172,9 +171,9 @@ class TestConfigLoad:
 
     def test_plugin_instances_parsed(self, sample_config_yaml):
         config = Config.load(sample_config_yaml)
-        sr = config.plugin_instances["strategy_radar"]
-        assert sr.enabled is True
-        assert sr.schedule == "0 14 * * 5"
+        sr = config.plugin_instances["sop_reminder"]
+        assert sr.enabled is False
+        assert sr.schedule is None
         assert sr.notify_on == ["family"]
 
     def test_empty_webhooks_when_missing(self, temp_dir):

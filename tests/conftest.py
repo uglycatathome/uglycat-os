@@ -37,16 +37,6 @@ def sample_config_yaml(temp_dir):
                     "schedule": None,
                     "notify_on": ["family"],
                 },
-                "strategy_radar": {
-                    "enabled": True,
-                    "schedule": "0 14 * * 5",
-                    "notify_on": ["family"],
-                },
-                "market_pulse": {
-                    "enabled": True,
-                    "schedule": "0 18 * * 0-4",
-                    "notify_on": ["invest"],
-                },
             },
         },
         "webhooks": {

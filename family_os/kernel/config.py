@@ -39,16 +39,6 @@ class LLMConfig(BaseModel):
     # 每日新闻解读插件专用模型链（免费模型，配 model_pricing 0 价）
     news_digest_model: str = "Qwen/Qwen3-8B"
     news_digest_fallback_models: list[str] = []
-    # 战略雷达插件专用模型链（免费模型，配 model_pricing 0 价；替换原 DeepSeek 付费模型）
-    strategy_radar_model: str = "Qwen/Qwen3-8B"
-    strategy_radar_fallback_models: list[str] = []
-    # Stage3/4 + 周报摘要（长文生成）专用模型链；为空则回落 strategy_radar_model 链
-    strategy_radar_analysis_model: str = ""
-    strategy_radar_analysis_fallback_models: list[str] = []
-    # 市场温度插件的家庭建议模型链；主模型为空 → 回落 default_model
-    market_pulse_model: str = ""
-    market_pulse_fallback_models: list[str] = []
-
 
 class PluginConfig(BaseModel):
     """Plugin discovery and enablement settings."""

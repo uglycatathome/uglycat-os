@@ -250,7 +250,7 @@ class Notifier:
                         group: str) -> list[str]:
         """该群本次要发的 Markdown 消息列表（单来源，供 wechat/serverchan 共用）。
 
-        优先取 ``result.data["_messages"][group]``；strategy_radar 走单条周报规则；
+        优先取 ``result.data["_messages"][group]``；
         插件未提供时退回通用主消息构造（``_build_primary_message``）。
         """
         messages_dict = (result.data or {}).get("_messages", {})
@@ -258,11 +258,7 @@ class Notifier:
             messages_dict = {}
 
         content = messages_dict.get(group)
-        # Build message list: _messages[group] takes priority.
-        # For strategy_radar, the briefing itself IS the single message
-        # (2026-09-27 起只发一条精简周报摘要，不再拆分多条)。
-        if content and plugin_name == "strategy_radar":
-            return self._format_for_wechat(result, plugin_name)
+        # _messages[group] 优先；插件未提供则回退通用构造。
         if content:
             return [content]
         return [self._build_primary_message(result, plugin_name)]
@@ -275,7 +271,7 @@ class Notifier:
         ``config.plugin_instances``) names one or more webhooks.  Each named
         webhook receives a single Markdown message; content is taken from
         ``result.data["_messages"][webhook_name]`` when the plugin provides it
-        (e.g. market_pulse's privacy-split family/invest messages), otherwise
+        （插件可用 ``_messages`` 为不同群提供不同内容），否则
         the generic primary message builder is used as a fallback.
 
         Parameters
@@ -292,8 +288,8 @@ class Notifier:
             )
             return
 
-        # 显式 skipped（如 strategy_radar 因 LLM 欠费/网络不可用）：静默，不推送
-        # 空内容标题（"❌ 插件名"）；原因由 health_check 周报从 status.json 汇报。
+        # 显式 skipped（如 LLM 欠费/网络不可用）：静默，不推送
+        # 空内容标题（"❌ 插件名"）；具体原因写入 status.json 供本地排查。
         if result.status == "skipped":
             logger.info(
                 "[wechat] plugin '%s' status=skipped → 静默跳过（不推空内容，原因见健康周报）",
@@ -433,13 +429,7 @@ class Notifier:
         Each returned message is guaranteed ≤ 4000 UTF-8 bytes (safe margin
         below the 4096-byte WeChat limit).
 
-        For ``strategy_radar`` results, the ``briefing`` itself IS the message:
-        2026-09-27 起只发一条精简周报摘要（不再拆「主消息 + 分板块多条」）。
         """
-        # strategy_radar: 单条消息 = 周报摘要本身
-        if plugin_name == "strategy_radar" and result.data.get("briefing"):
-            return [Notifier._safe_trim(result.data["briefing"])]
-
         return [Notifier._build_primary_message(result, plugin_name)]
 
     @staticmethod
@@ -462,7 +452,7 @@ class Notifier:
         lines.append(f"> {now_str}")
         lines.append("")
 
-        # Stats line from data (strategy_radar convention)
+        # Stats line from result data
         if result.data:
             parts = []
             if "week" in result.data:

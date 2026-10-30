@@ -435,64 +435,7 @@ class TestFormatForWechat:
         # Count note must appear when not all fit
         assert "共 50 项" in primary
 
-    def test_strategy_radar_single_message(self):
-        """Briefing with 4 categories → 只发一条消息（周报摘要本身）。"""
-        briefing = (
-            "# 战略雷达周报\n"
-            "> 2026-W30 | 抓取 50 篇 · 精选 15 篇\n\n"
-            "**📈 投资**：利率下行，债市走强。\n"
-            "**💼 职业**：AI 岗位需求继续增长。\n"
-            "**🚀 创业**：消费补贴政策落地。\n"
-            "**💰 副业**：灵活用工平台规范趋严。\n\n"
-            "💡 家庭行动：关注债券类资产配置。\n"
-        )
-        result = Result(
-            status="ok",
-            data={
-                "week": "2026-W30",
-                "total_fetched": 50,
-                "total_selected": 15,
-                "briefing": briefing,
-            },
-            suggestions=[
-                {"title": "本周抓取 50 篇，精选 15 篇", "priority": "low",
-                 "detail": "覆盖 投资 · 职业 · 创业 · 副业 板块"},
-            ],
-        )
-        messages = Notifier._format_for_wechat(result, "strategy_radar")
 
-        # 只发一条：完整摘要本身
-        assert len(messages) == 1, f"Expected 1 message, got {len(messages)}"
-        assert "2026-W30" in messages[0]
-        assert "📈 投资" in messages[0]
-        assert "家庭行动" in messages[0]
-        # 不再出现「建议」列表等主消息内容
-        assert "Suggestions" not in messages[0]
-
-    def test_strategy_radar_single_message_empty_categories(self):
-        """即使含无信号板块，也只发一条消息（精简由插件层负责）。"""
-        briefing = (
-            "# 战略雷达周报\n"
-            "> 2026-W30 | 抓取 50 篇 · 精选 15 篇\n\n"
-            "**📈 投资**：利率下行，债市走强。\n"
-            "**🚀 创业**：该板块本周无重要信号。\n\n"
-            "💡 家庭行动：关注债券类资产配置。\n"
-        )
-        result = Result(
-            status="ok",
-            data={
-                "week": "2026-W30",
-                "total_fetched": 50,
-                "total_selected": 15,
-                "briefing": briefing,
-            },
-        )
-        messages = Notifier._format_for_wechat(result, "strategy_radar")
-
-        # 仍是一条完整消息
-        assert len(messages) == 1
-        assert "该板块本周无重要信号" in messages[0]
-        assert "家庭行动" in messages[0]
 
     def test_safe_trim_preserves_utf8_boundaries(self):
         """``_safe_trim`` must not corrupt multi-byte UTF-8 characters."""

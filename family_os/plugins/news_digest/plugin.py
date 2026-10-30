@@ -2,7 +2,7 @@
 
 流程：LLM 可用性探针 → 抓取当日新闻 → 4 阶段分析（黑话解码 + 措辞对比）→
 构建双群一致的 digest → 返回 Result 触发推送。LLM 不可用时写 status=skipped
-并静默不推送（由 health_check 汇报）。
+并静默不推送（原因写入 status.json 供排查）。
 
 CLI：
   news run            立即执行

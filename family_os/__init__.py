@@ -1,6 +1,6 @@
 """Family AI OS — a family organizational operating system.
 
-Stage 1: Core kernel foundation + verification plugin (sop_reminder).
+核心内核 + 插件框架。
 """
 
 __version__ = "0.1.0"

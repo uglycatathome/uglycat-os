@@ -323,8 +323,7 @@ class LLMGateway:
             return "zhipu"
         llm = self._config.llm
         chain = [llm.news_digest_model, *(llm.news_digest_fallback_models or [])]
-        radar_chain = [llm.strategy_radar_model, *(llm.strategy_radar_fallback_models or [])]
-        if model in chain or model in radar_chain:
+        if model in chain:
             return "siliconflow"
         if "deepseek" in model:
             return "deepseek"

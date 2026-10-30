@@ -2,7 +2,7 @@
 
 - 每日运行快照：data/history/news_digest/<YYYY-MM-DD>/（raw + 各阶段输出 + digest）
 - 措辞对比库：data/history/news_digest/meeting_archive/（永留存，cleanup 不删）
-- 状态文件：data/history/news_digest/status.json（供 health_check 周报）
+- 状态文件：data/history/news_digest/status.json（供本地排查与健康巡检）
 """
 
 import json
