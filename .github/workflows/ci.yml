@@ -38,9 +38,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: setup --check-only (unix)
+      - name: 体检模式
         if: runner.os != 'Windows'
         run: bash install/setup.sh --check-only
-      - name: setup --check-only (windows)
+      - name: 体检模式（Windows）
         if: runner.os == 'Windows'
         run: powershell -ExecutionPolicy Bypass -File install/setup.ps1 -CheckOnly
+      # 真正跑一遍安装，并验证启动器可用（只有 --check-only 不足以证明"装得上"）
+      - name: 完整安装（Unix）
+        if: runner.os != 'Windows'
+        run: |
+          bash install/setup.sh
+          ./uglycat --help > /dev/null
+          echo "install ok"
+      - name: 完整安装（Windows）
+        if: runner.os == 'Windows'
+        run: |
+          powershell -ExecutionPolicy Bypass -File install/setup.ps1
+          .\uglycat.cmd --help | Out-Null
+          Write-Output "install ok"

@@ -769,6 +769,24 @@ class TestSelectStage:
         # 活动通知（含正式文件词但属活动）仍应剔除
         assert A._is_qualified_news({"title": "关于举办2026世界人工智能大会高峰论坛的通知"}) is False
 
+    def test_qualified_news_gate_rejects_party_and_quote_pieces(self):
+        """2026-10-30 真实误选回归：党务主题、个人署名表态稿一律不够格。"""
+        from family_os.plugins.news_digest import analyzer as A
+
+        # 党务：即使标题含「决定」这类正式文件词也不选
+        assert A._is_qualified_news({
+            "title": "唐方裕：全会最重要的成果是审议通过了《中共中央关于持之以恒推进"
+                     "全面从严治党若干重大问题的决定》"}) is False
+        assert A._is_qualified_news({"title": "中央纪委国家监委部署党风廉政建设重点工作"}) is False
+        # 个人署名表态稿（非机构前缀）
+        assert A._is_qualified_news({"title": "张伟：下半年经济将保持稳中向好"}) is False
+        # 机构+冒号仍属发布口径，保留
+        assert A._is_qualified_news({"title": "国家统计局：10月CPI同比上涨1.8%"}) is True
+        assert A._is_qualified_news({"title": "财政部：明年将实施更积极的财政政策"}) is True
+        # 顶层会议不受影响
+        assert A._is_qualified_news({
+            "title": "中共中央政治局召开会议 分析研究2027年经济工作"}) is True
+
     def test_select_drops_unqualified_items(self, tmp_path):
         """LLM 选 3 条但 2 条不合格 → 只保留合格的那 1 条。"""
         from family_os.plugins.news_digest import analyzer
