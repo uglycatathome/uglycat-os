@@ -3,6 +3,10 @@
 新闻源清单在 `family_os/config/sources.yaml`。**只加公开可访问的源**：不需要登录、
 不绕过付费墙、不伪造 Cookie/Token。
 
+> **你自己的源请写进 `family_os/config/sources.local.yaml`**（已被 `.gitignore` 忽略）。
+> 它和主清单自动合并：同名条目覆盖字段（可用 `enabled: false` 关掉某个源），
+> 新名字条目追加。这样以后 `git pull` 更新主清单时，你的改动不会冲突、也不会被覆盖。
+
 ## 一个源长什么样
 
 ```yaml
@@ -32,7 +36,14 @@ sources:
    ```bash
    curl -s <url> | head -c 800        # RSS 应能看到 <item>；列表页应能看到文章标题
    ```
-2. 在 `sources.yaml` 追加条目（保持缩进，`enabled: true`）
+2. 在 `sources.local.yaml` 追加条目（保持缩进，`enabled: true`）；若文件不存在，新建即可：
+   ```yaml
+   sources:
+     - name: 某部委
+       type: rss
+       url: https://example.gov.cn/rss.xml
+       enabled: true
+   ```
 3. 跑一次抓取，看这个源是否被命中：
    ```bash
    ./uglycat run news_digest

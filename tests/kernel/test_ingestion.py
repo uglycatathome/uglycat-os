@@ -177,3 +177,36 @@ class TestSourceRegistry:
         registry = SourceRegistry(path)
         sources = registry.list_all()
         assert sources == []
+
+
+class TestLocalOverride:
+    """sources.local.yaml 覆写层（用户私加源，不被 git pull 覆盖）。"""
+
+    def _write(self, tmp_path, body):
+        (tmp_path / "sources.yaml").write_text(body, encoding="utf-8")
+
+    def test_local_adds_and_overrides(self, tmp_path):
+        from family_os.kernel.ingestion import SourceRegistry
+
+        self._write(tmp_path, "sources:\n  - name: A\n    type: rss\n    url: http://a\n    enabled: true\n")
+        (tmp_path / "sources.local.yaml").write_text(
+            "sources:\n  - name: A\n    enabled: false\n  - name: B\n    type: rss\n    url: http://b\n", encoding="utf-8")
+        reg = SourceRegistry(tmp_path / "sources.yaml")
+        by_name = {s["name"]: s for s in reg.list_all()}
+        assert by_name["A"]["enabled"] is False, "同名条目应被覆写"
+        assert "B" in by_name, "新条目应追加"
+
+    def test_no_local_file_keeps_defaults(self, tmp_path):
+        from family_os.kernel.ingestion import SourceRegistry
+
+        self._write(tmp_path, "sources:\n  - name: A\n    type: rss\n    url: http://a\n    enabled: true\n")
+        reg = SourceRegistry(tmp_path / "sources.yaml")
+        assert [s["name"] for s in reg.list_all()] == ["A"]
+
+    def test_broken_local_is_ignored(self, tmp_path):
+        from family_os.kernel.ingestion import SourceRegistry
+
+        self._write(tmp_path, "sources:\n  - name: A\n    type: rss\n    url: http://a\n")
+        (tmp_path / "sources.local.yaml").write_text("sources: [oops", encoding="utf-8")
+        reg = SourceRegistry(tmp_path / "sources.yaml")
+        assert len(reg.list_all()) == 1

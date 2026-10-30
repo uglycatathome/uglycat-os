@@ -3,6 +3,10 @@
 venv/
 data/
 logs/
+# 用户私有清单：自加的 RSS 源写这里，git pull 更新主清单时不会冲突
+family_os/config/sources.local.yaml
+prompts/*.md
+!prompts/README.md
 *.db
 *.sqlite
 __pycache__/

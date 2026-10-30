@@ -87,7 +87,8 @@ Python 必须 >= 3.11。优先使用 `uv`，没有则用 `python -m venv`。
 
 1. 验证目标地址可公开访问（无需登录、无需 Cookie、非订阅制）：
    `curl -s <url> | head -c 800`，RSS 应含 `<item>`，列表页应能看到文章标题
-2. 按 `docs/sources.md` 的字段往 `family_os/config/sources.yaml` 追加条目
+2. 把条目写进 `family_os/config/sources.local.yaml`（**不要改主清单 `sources.yaml`**：
+   主清单会被上游更新覆盖/冲突；`sources.local.yaml` 已 gitignore 且自动合并）
    （`web_list` 必须给 `link_pattern`；地方源可设 `title_include` 压噪）
 3. 跑 `./uglycat run news_digest`，看「今日抓取 N 条」是否增加
 4. 若某源连续失败，先置 `enabled: false`，不要删掉其他源
@@ -105,7 +106,7 @@ Python 必须 >= 3.11。优先使用 `uv`，没有则用 `python -m venv`。
 
 ## 禁区
 
-- 不要修改 `family_os/config/sources.yaml` 里未列出的站点，也不要抓订阅制媒体全文
+- 不要修改 `family_os/config/sources.yaml`（用 `sources.local.yaml`），也不要抓订阅制媒体全文
 - 不要把 `.env` 内容写入提交、日志或对话
 - 不要用 `sudo` 安装；本项目全部为用户级安装
 - 不要跳过 `doctor`；它是唯一的完成判据

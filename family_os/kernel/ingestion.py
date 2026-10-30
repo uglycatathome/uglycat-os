@@ -164,6 +164,36 @@ class SourceRegistry:
             data = yaml.safe_load(f)
 
         self._sources = data.get("sources", []) if data else []
+        self._merge_local()
+
+    def _merge_local(self) -> None:
+        """合并同目录下的 `sources.local.yaml`（用户私有清单，2026-10-30）。
+
+        用户自加的源写在这里，`git pull` 更新主清单时不会冲突：
+          · name 与主清单相同的条目 → 覆盖对应字段（典型用法：`enabled: false` 关掉某源）
+          · name 全新的条目 → 追加到末尾
+        文件不存在或格式错误时静默跳过，行为与本功能不存在时完全一致。
+        """
+        local = self._sources_path.with_name("sources.local.yaml")
+        if not local.exists():
+            return
+        try:
+            data = yaml.safe_load(local.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("sources.local.yaml 解析失败，已忽略：%s", e)
+            return
+        extra = (data or {}).get("sources", []) or []
+        index = {(s.get("name") or s.get("id")): i
+                 for i, s in enumerate(self._sources)}
+        for item in extra:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("name") or item.get("id")
+            if key and key in index:
+                self._sources[index[key]] = {**self._sources[index[key]], **item}
+            else:
+                self._sources.append(item)
+        logger.info("已合并用户私有源 %d 条（sources.local.yaml）", len(extra))
 
     # ── Queries ────────────────────────────────────────────────────────────────
 

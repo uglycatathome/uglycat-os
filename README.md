@@ -107,6 +107,29 @@ SERVERCHAN_SENDKEY=SCT你的SendKey
 
 ---
 
+## 升级与自定义（不会被覆盖）
+
+```bash
+git pull        # 升级到最新：代码与默认规则、默认源清单
+```
+
+你自己的东西都放在不会被上游覆盖的位置：
+
+| 你的内容 | 放哪 | 升级时 |
+|---|---|---|
+| 自加的 RSS 源 | `family_os/config/sources.local.yaml` | ✅ 自动合并，不冲突 |
+| 调优的筛选/解读规则 | `prompts/*.md` | ✅ 不冲突 |
+| 密钥 | `.env` | ✅ 不冲突 |
+
+---
+
+## 维护说明
+
+个人开源项目：会持续更新，但不承诺固定的 Issue 响应时间；欢迎直接提 PR（见
+[CONTRIBUTING.md](CONTRIBUTING.md)）。如果某一期推送质量明显下降，欢迎带截图开 Issue。
+
+---
+
 ## 工作原理
 
 ```
