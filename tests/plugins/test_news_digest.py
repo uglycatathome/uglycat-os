@@ -787,6 +787,20 @@ class TestSelectStage:
         assert A._is_qualified_news({
             "title": "中共中央政治局召开会议 分析研究2027年经济工作"}) is True
 
+    def test_select_prompt_includes_user_rules(self, tmp_path, monkeypatch):
+        """prompts/select.md 存在时会被追加到精选提示词（用户可自行调优口径）。"""
+        from family_os.plugins.news_digest import analyzer
+
+        (tmp_path / "prompts").mkdir()
+        (tmp_path / "prompts" / "select.md").write_text(
+            "- 标题含「电影周」的一律不选。", encoding="utf-8")
+        monkeypatch.setenv("UGLYCAT_PROMPTS_DIR", str(tmp_path / "prompts"))
+        assert "标题含「电影周」的一律不选" in analyzer._extra_rules("select")
+        # 未提供的阶段不受影响
+        assert analyzer._extra_rules("stage1") == ""
+        monkeypatch.setenv("UGLYCAT_PROMPTS_DIR", str(tmp_path / "nonexistent"))
+        assert analyzer._extra_rules("select") == ""
+
     def test_select_drops_unqualified_items(self, tmp_path):
         """LLM 选 3 条但 2 条不合格 → 只保留合格的那 1 条。"""
         from family_os.plugins.news_digest import analyzer

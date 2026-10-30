@@ -7,7 +7,9 @@
 
 import json
 import logging
+import os
 import re
+from pathlib import Path
 
 from family_os.kernel.context import Context
 
@@ -16,6 +18,28 @@ from . import decode
 logger = logging.getLogger("family_os.news_digest.analyzer")
 
 PLUGIN = "news_digest"
+
+
+def _extra_rules(name: str) -> str:
+    """读取用户自定义提示词补充规则（`prompts/<name>.md`）。
+
+    使用者（或使用者的 AI）只改这些 markdown 文件、不动代码，就能持续优化
+    评选口径与黑话解读；文件不存在或为空时返回空串，行为与默认完全一致。
+    路径可用环境变量 `UGLYCAT_PROMPTS_DIR` 覆盖，默认相对当前目录的 `prompts/`。
+    """
+    p = Path(os.environ.get("UGLYCAT_PROMPTS_DIR", "prompts")) / f"{name}.md"
+    try:
+        if not p.is_file():
+            return ""
+        txt = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not txt:
+        return ""
+    return ("\n\n## 用户自定义规则（优先遵循）\n"
+            "以下是使用者针对本阶段的补充要求。若与上文的输出格式要求冲突，"
+            "仍以 JSON 输出格式为准。\n"
+            f"{txt}")
 
 # 党和国家重要会议登记表（2026-10-10 按用户提供的完整清单结构化）。
 # 每项：(名称正则, 归档 key, 规范会议名)。
@@ -319,6 +343,7 @@ def _stage_dedup(ctx, articles,
         "只输出 JSON，不要输出其他文字。\n"
         f"{recent_block}\n"
         f"## 今日候选新闻（index 从 0 起）\n{listing}"
+        + _extra_rules("dedup")
     )
     try:
         raw = _ask_with_fallback(ctx, prompt)
@@ -530,6 +555,7 @@ def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
         "\"reason\":\"...\",\"topic_key\":\"...\"}]}。"
         "只输出 JSON，不要输出其他文字。\n"
         f"## 当日新闻\n{limited}"
+        + _extra_rules("select")
     )
     try:
         raw = _ask_with_fallback(ctx, prompt)
@@ -744,6 +770,7 @@ def _stage0_extract(ctx, block, articles) -> str:
         "\"key_phrases\":[\"...\",\"...\"],\"source\":\"来源\",\"date\":\"日期\"}]}。"
         "若无官方措辞则 items 为空数组。只输出 JSON，不要输出任何其他文字。\n\n"
         f"## 当日新闻\n{limited}"
+        + _extra_rules("stage0")
     )
     raw = _ask_with_fallback(ctx, prompt)
     parsed = _stage0_parse(raw)
@@ -839,6 +866,7 @@ def _stage1_decode(ctx, block, stage0, articles=None) -> str:
         "『全面推开 → 全国都会执行，别只看试点城市』；『限期整改 → 相关行业要动真格，别抱侥幸』\n"
         "若这些措辞并非真实政策表述、无解读价值，则不要输出任何内容（宁可留空）。\n\n"
         f"## 今日要闻\n{news}\n\n## 特征措辞\n{stage0}"
+        + _extra_rules("stage1")
     )
     return _ask_with_fallback(ctx, prompt)
 
@@ -872,6 +900,7 @@ def _stage2_compare(ctx, block, stage0, meeting_archive, focus: str = "") -> str
         "每条一句话（≤50 字）：说清今天的说法相对历史公报是【新提法】【力度变化】还是"
         "【延续】。与核心判断无关的措辞不要写；没有相关变化就只输出「（无相关历史变化）」。\n\n"
         f"{focus_block}\n## 今日特征措辞\n{stage0}\n\n## 历史公报文本\n{corpus}"
+        + _extra_rules("stage2")
     )
     return _ask_with_fallback(ctx, prompt)
 
@@ -916,6 +945,7 @@ def _stage_market_impact(ctx, articles) -> str:
         "股市：……\n"
         "建议：……\n\n"
         f"## 今日要闻\n{news}"
+        + _extra_rules("market_impact")
     )
     return _ask_with_fallback(ctx, prompt)
 
@@ -949,6 +979,7 @@ def _stage3_advice(ctx, stage1, stage2, articles=None) -> str:
         "前置『💡』，只输出这一条，不要解释。\n\n"
         f"## 今日要闻（唯一事实来源）\n{news}\n\n"
         f"## 措辞解读\n{stage1}\n\n## 历史对比\n{stage2}"
+        + _extra_rules("stage3")
     )
     return _ask_with_fallback(ctx, prompt)
 

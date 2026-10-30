@@ -79,6 +79,30 @@ Python 必须 >= 3.11。优先使用 `uv`，没有则用 `python -m venv`。
 
    判据：输出包含"已写入/已执行"。机器睡眠错过时间后，执行 `./uglycat catch-up` 补跑当天。
 
+## 后续可按用户要求做的两件事
+
+### A. 扩展新闻源
+
+用户说「再加一个新闻源 / 我想看某个部门的发布」时：
+
+1. 验证目标地址可公开访问（无需登录、无需 Cookie、非订阅制）：
+   `curl -s <url> | head -c 800`，RSS 应含 `<item>`，列表页应能看到文章标题
+2. 按 `docs/sources.md` 的字段往 `family_os/config/sources.yaml` 追加条目
+   （`web_list` 必须给 `link_pattern`；地方源可设 `title_include` 压噪）
+3. 跑 `./uglycat run news_digest`，看「今日抓取 N 条」是否增加
+4. 若某源连续失败，先置 `enabled: false`，不要删掉其他源
+
+### B. 优化筛选与解读口径（提示词）
+
+用户说「这条不该推 / 该推的漏了 / 解读太泛」时：
+
+1. 按 `docs/prompts.md`，把问题写成**可判定的规则**，写进 `prompts/<阶段>.md`
+   （`select.md` 管精选，`stage1.md` 管黑话解读，`stage3.md` 管一句话建议）
+2. 一次只改一条规则，改完立刻 `./uglycat run news_digest` 验证
+3. 把这次的问题沉淀成回归测试（见 `CONTRIBUTING.md`），避免退化
+4. 不要直接改 `family_os/plugins/news_digest/analyzer.py` 里的内置提示词——
+   代码升级会覆盖，且内置规则承载了硬门槛（活动/栏目/党务/地方数据）
+
 ## 禁区
 
 - 不要修改 `family_os/config/sources.yaml` 里未列出的站点，也不要抓订阅制媒体全文
