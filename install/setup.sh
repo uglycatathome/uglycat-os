@@ -45,7 +45,10 @@ if [ -z "$PY" ]; then
   say "  macOS：brew install python@3.11   Linux：用发行版包管理器或 pyenv 安装" >&2
   exit 1
 fi
-say "Python：$PY（$("$PY" -c 'import sys;print("%d.%d.%d" % sys.version_info[:3])')）"
+# 注意：变量后紧贴中文全角字符时，部分 bash（macOS 3.2）会把多字节字节并入变量名，
+# 触发 set -u 的 "unbound variable"。统一用 ${VAR} 花括号隔离，并先算好版本号。
+PY_VER="$("$PY" -c 'import sys;print("%d.%d.%d" % sys.version_info[:3])')"
+say "Python：${PY}（${PY_VER}）"
 say "目录：  $ROOT"
 
 if command -v uv >/dev/null 2>&1; then
