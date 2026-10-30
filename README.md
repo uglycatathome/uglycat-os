@@ -64,6 +64,7 @@ SERVERCHAN_SENDKEY=SCT你的SendKey
 
 | 文档 | 内容 |
 |---|---|
+| [架构](docs/architecture.md) | 内核与插件的关系、数据与隐私边界 |
 | [让 AI 帮你装](docs/ai-install.md) | 给 AI 的提示词与检查点 |
 | [通知渠道](docs/notify.md) | Server酱 配置、失败排查、自定义渠道 |
 | [插件开发](docs/plugin-dev.md) | 插件契约、目录结构、最小示例 |
