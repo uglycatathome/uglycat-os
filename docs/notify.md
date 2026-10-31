@@ -29,7 +29,8 @@ SERVERCHAN_SENDKEY=SCT你的SendKey
 ./uglycat run news_digest --notify
 ```
 
-微信应收到一条「每日新闻解读」。没收到时看控制台 warning：
+微信应收到一条「每日新闻解读」（内容形如 [examples/sample_digest.md](../examples/sample_digest.md)，
+一条纯经济类新闻的完整解读）。没收到时看控制台 warning：
 
 | 日志 | 含义 | 处理 |
 |---|---|---|

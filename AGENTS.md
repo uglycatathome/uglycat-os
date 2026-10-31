@@ -102,7 +102,7 @@ Python 必须 >= 3.11。优先使用 `uv`，没有则用 `python -m venv`。
 2. 一次只改一条规则，改完立刻 `./uglycat run news_digest` 验证
 3. 把这次的问题沉淀成回归测试（见 `CONTRIBUTING.md`），避免退化
 4. 不要直接改 `family_os/plugins/news_digest/analyzer.py` 里的内置提示词——
-   代码升级会覆盖，且内置规则承载了硬门槛（活动/栏目/党务/地方数据）
+   代码升级会覆盖，且内置规则承载了硬门槛（活动/栏目/非经济主题/地方数据）
 
 ## 禁区
 
