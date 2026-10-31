@@ -954,6 +954,51 @@ class TestSelectStage:
         assert "一律不许出现" in p
         assert "普通个人/家庭" in p
         assert "今日无直接可执行建议" in p
+        assert "未提供家庭情况" in p, "没有录入家庭信息时必须走普通口径"
+
+    def test_stage3_uses_family_facts_when_configured(self, tmp_path):
+        """录入家庭情况后，建议要把这些信息带进提示词并要求结合。"""
+        from family_os.plugins.news_digest import analyzer
+
+        prompts = []
+
+        class Rec:
+            def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
+                prompts.append(prompt)
+                return "💡 本月先查公积金中心，看贷款额度是否上调再定买房节奏"
+
+        ctx = _mk_ctx(tmp_path, Rec())
+        ctx.store.add_fact("家庭", "孩子学段", "小学二年级", member="老大")
+        ctx.store.add_fact("支出", "房贷", "每月4200元")
+        analyzer._stage3_advice(ctx, "解读", "对比",
+                                [{"title": "多地调整公积金政策",
+                                  "summary": "提高贷款额度"}])
+        p = prompts[0]
+        assert "我的家庭/个人情况" in p
+        assert "小学二年级" in p and "每月4200元" in p
+        assert "结合这些具体情况" in p
+        assert "不要复述其中的姓名、金额" in p
+        assert "未提供家庭情况" not in p
+
+    def test_stage3_ignores_secret_facts(self, tmp_path):
+        """sensitivity=secret 的事实不进入任何 LLM 调用。"""
+        from family_os.plugins.news_digest import analyzer
+
+        prompts = []
+
+        class Rec:
+            def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
+                prompts.append(prompt)
+                return "💡 本月核对一下自己的报销与补贴条件"
+
+        ctx = _mk_ctx(tmp_path, Rec())
+        ctx.store.add_fact("健康", "体检异常", "甲状腺结节", sensitivity="secret")
+        analyzer._stage3_advice(ctx, "解读", "对比",
+                                [{"title": "医保报销目录调整", "summary": "新增项目"}])
+        p = prompts[0]
+        assert "甲状腺结节" not in p
+        assert "我的家庭/个人情况" not in p
+        assert "未提供家庭情况" in p
 
     def test_is_monetary_news_detection(self):
         """中国/美国的降息加息、降准、LPR、美联储议息都要触发黄金/股市说明。"""

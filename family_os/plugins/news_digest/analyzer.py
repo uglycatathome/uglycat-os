@@ -950,18 +950,63 @@ def _stage_market_impact(ctx, articles) -> str:
     return _ask_with_fallback(ctx, prompt)
 
 
+def _family_block(ctx) -> str:
+    """把用户录入的家庭/个人信息整理成 Prompt 片段；未配置时返回空串。
+
+    `sensitivity=secret` 的事实不进入任何 LLM 调用（与 market_pulse /
+    strategy_radar 口径一致）。读取失败只记 warning，不影响当日推送。
+    """
+    try:
+        from family_os.kernel.privacy import is_secret_fact
+
+        facts = ctx.store.query_facts() or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("news_digest 读取家庭信息失败: %s", e)
+        return ""
+    items = []
+    for f in facts:
+        if is_secret_fact(f):
+            continue
+        try:
+            items.append((f["member"] or "全家", f["type"], f["key"], f["value"]))
+        except (KeyError, IndexError, TypeError):
+            continue
+    if not items:
+        return ""
+    lines = ["## 我的家庭/个人情况（本地录入，仅用于本次建议）"]
+    for member, ftype, key, value in items[:15]:
+        lines.append(f"- {member}｜{ftype}｜{key}：{value}")
+    return "\n".join(lines)
+
+
 def _stage3_advice(ctx, stage1, stage2, articles=None) -> str:
-    """唯一 1 条可执行建议。articles 为今日精选（唯一事实来源），避免模型凭空编造。"""
+    """唯一 1 条可执行建议。articles 为今日精选（唯一事实来源），避免模型凭空编造。
+
+    若用户在本地录入过家庭/个人信息，建议要落到该家庭的具体处境；未录入才给
+    泛泛的普通人建议。
+    """
     news = "\n".join(
         f"- {a.get('title', '')}：{(a.get('summary') or '')[:120]}"
         for a in (articles or [])[:3]
     ) or "（无）"
+    family = _family_block(ctx)
+    if family:
+        family_rule = (
+            "⑦ 下方提供了我（读者本人）的家庭情况：建议要结合这些具体情况，落到我能做的"
+            "动作与判断标准上；不要复述其中的姓名、金额等原始信息，也不要提与本条新闻无关的项。\n"
+            "⑧ 结合不上时仍按普通家庭口径给建议，但不得编造家庭信息。\n"
+        )
+    else:
+        family_rule = (
+            "⑦ 未提供家庭情况：按普通个人/家庭口径给建议，不要假设读者有房贷、孩子或特定收入。\n"
+        )
     prompt = (
         "任务：结合核心判断与今日新闻，从『普通老百姓』视角给出**唯一 1 条**可执行建议（≤70 字）。\n"
         "硬要求：\n"
         "① 事实只能来自下方【今日要闻】，里面没写到的部门/文件/目录/数字一律不许出现；\n"
         "② 读者只能是【普通个人/家庭】，不能把平台/企业/机构当成读者；"
-        "不要只写给某个小众人群（在校大学生、某城市、某职业、某收入段都算窄口径）；\n"
+        "不要只写给某个小众人群（在校大学生、某城市、某职业、某收入段都算窄口径）——"
+        "除非下方提供了我的家庭情况，这时可以围绕该家庭写，但仍不写人名与具体金额；\n"
         "③ 先按新闻类型选传导路径，再落到个人动作："
         "给钱/减负→看自己是否符合条件、去哪申领；收紧/限制→看自己是否在范围内、先停/改再观望；"
         "定调/规划→记住落地节点、等细则；数据发布→用数据校准自己的收支/房贷/就业判断；\n"
@@ -971,6 +1016,7 @@ def _stage3_advice(ctx, stage1, stage2, articles=None) -> str:
         "才用同类官方渠道（人社局/公积金中心/央行/统计局/税务等），不得自造项目名；\n"
         "⑥ 只给一个动作，不喊口号、不贩卖焦虑。**若这条政策主要约束平台/企业，"
         "对普通个人没有直接可执行动作，就输出「💡 今日无直接可执行建议」**，不要硬编一个。\n"
+        + family_rule +
         "正例（不同类型，领会思路，别照抄）：\n"
         "  就业类：💡 本月登录当地人社局官网查申报入口，符合条件就直接提交。\n"
         "  货币类：💡 等下次 LPR 公布后再决定是否提前还贷，别在这个月锁死。\n"
@@ -979,6 +1025,7 @@ def _stage3_advice(ctx, stage1, stage2, articles=None) -> str:
         "前置『💡』，只输出这一条，不要解释。\n\n"
         f"## 今日要闻（唯一事实来源）\n{news}\n\n"
         f"## 措辞解读\n{stage1}\n\n## 历史对比\n{stage2}"
+        + (f"\n\n{family}" if family else "")
         + _extra_rules("stage3")
     )
     return _ask_with_fallback(ctx, prompt)
