@@ -210,3 +210,18 @@ class TestLocalOverride:
         (tmp_path / "sources.local.yaml").write_text("sources: [oops", encoding="utf-8")
         reg = SourceRegistry(tmp_path / "sources.yaml")
         assert len(reg.list_all()) == 1
+
+    def test_disabled_source_not_fetched(self, tmp_path):
+        """enabled: false 的源要被 get_sources_by_tags 过滤掉（本地关源的典型用法）。"""
+        from family_os.kernel.ingestion import SourceRegistry
+
+        self._write(tmp_path,
+                    "sources:\n"
+                    "  - name: A\n    type: rss\n    url: http://a\n"
+                    "    tags: [新闻]\n    enabled: true\n"
+                    "  - name: B\n    type: rss\n    url: http://b\n"
+                    "    tags: [新闻]\n    enabled: false\n")
+        reg = SourceRegistry(tmp_path / "sources.yaml")
+        assert [s["name"] for s in reg.get_sources_by_tags(["新闻"])] == ["A"]
+        assert {s["name"] for s in reg.list_all()} == {"A", "B"}, \
+            "list_all 仍应保留被关掉的源，便于排查"

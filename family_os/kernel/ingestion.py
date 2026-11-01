@@ -218,7 +218,9 @@ class SourceRegistry:
             Matching source objects (empty list if none match).
         """
         tag_set = set(tags)
-        return [s for s in self._sources if tag_set & set(s.get("tags", []))]
+        # enabled: false 的源不参与抓取（sources.local.yaml 里关掉某源的典型用法）。
+        return [s for s in self._sources
+                if s.get("enabled", True) and tag_set & set(s.get("tags", []))]
 
     def get_source_by_id(self, source_id: str) -> dict | None:
         """Return a source by its id, or ``None`` if not found.

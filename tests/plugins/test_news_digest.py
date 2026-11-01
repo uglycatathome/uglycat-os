@@ -124,7 +124,7 @@ class TestDigestJson:
         assert d["total_fetched"] == 2 and d["selected_count"] == 1
         assert d["selected"][0] == {
             "source": "中新网", "title": "买房国补上线", "url": "http://x",
-            "summary": "摘要内容", "reason": "重要理由"}
+            "category": "", "summary": "摘要内容", "reason": "重要理由"}
         assert d["stage3"] == "一句话建议"
 
     def test_build_digest_json_empty_selected_keeps_note(self):
@@ -407,9 +407,9 @@ class TestDualGroupMessage:
             def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
                 # 精选 → stage0 → 其余阶段
                 if "精选" in prompt:
-                    return '{"items":[{"title":"国务院部署稳增长工作",' \
+                    return '{"items":[{"title":"国务院印发《关于促进民营经济发展壮大的意见》",' \
                            '"summary":"加力扩大内需，推动重大项目开工，政策落地提速、更积极。",' \
-                           '"reason":"直接关系就业与消费。"}]}'
+                           '"reason":"直接关系创业与就业。"}]}'
                 if "输出 JSON" in prompt:
                     return '{"items":[{"thread":"财政","key_phrases":["加力扩大内需"]}]}'
                 return "解读内容\n💡建议一句话"
@@ -429,14 +429,15 @@ class TestDualGroupMessage:
         msg = res.data.get("_messages", {})
         assert msg, "ok 时应构建双群消息"
         assert msg.get("family") == msg.get("invest"), "双群内容必须一致"
-        assert "💡" in msg["family"]  # 标题「### 💡 老百姓一句话建议」保留图例
+        assert "💡" in msg["family"]  # 标题「### 💡 对创业·职业·投资的建议」保留图例
         assert "今日抓取 1 条 · 精选 1 条" in msg["family"]
         assert "📌 今日要闻" in msg["family"], "应先列出今日要闻（摘要+出处）"
-        assert "**[国务院部署稳增长工作](http://x.com/1)**" in msg["family"]
-        assert "来源：test" in msg["family"]
+        assert "**[国务院印发《关于促进民营经济发展壮大的意见》](http://x.com/1)**" \
+            in msg["family"]
+        assert "分类：重要文件｜来源：test" in msg["family"], "应标注信号类型"
         assert msg["family"].count("http://x.com/1") == 1, "URL 只出现在链接目标里，不裸显"
         assert "加力扩大内需，推动重大项目开工" in msg["family"], "应含更丰富的 AI 摘要"
-        assert "为什么重要：直接关系就业与消费" in msg["family"]
+        assert "为什么重要：直接关系创业与就业" in msg["family"]
         assert "⚠️ 历史措辞变化" in msg["family"], "措辞变化解析需强调（标题图例保留）"
         assert "📝 加力扩大内需" not in msg["family"], "正文行首图例应剔除"
 
@@ -444,7 +445,8 @@ class TestDualGroupMessage:
 class _FakeFetcher:
     def fetch_articles(self, data_dir, registry):
         return [
-            {"title": "国务院部署稳增长工作", "url": "http://x.com/1",
+            {"title": "国务院印发《关于促进民营经济发展壮大的意见》",
+             "url": "http://x.com/1",
              "summary": "加力扩大内需，推动条件成熟重大项目开工",
              "body": "", "published": "2026-09-27", "source_name": "test"},
         ]
@@ -538,8 +540,8 @@ class TestSelected:
         # 顺序：要闻 → 措辞解读 → ⚠️措辞变化 → 建议（标题保留图例）
         assert digest.index("### 📌 今日要闻") < digest.index("### 🔍 官方措辞解读")
         assert digest.index("### 🔍 官方措辞解读") < digest.index("### ⚠️ 历史措辞变化")
-        assert digest.index("### ⚠️ 历史措辞变化") < digest.index("### 💡 老百姓一句话建议")
-        assert digest.index("### 💡 老百姓一句话建议") < digest.index("建议一句话")
+        assert digest.index("### ⚠️ 历史措辞变化") < digest.index("### 💡 对创业·职业·投资的建议")
+        assert digest.index("### 💡 对创业·职业·投资的建议") < digest.index("建议一句话")
         assert "**[国务院部署稳增长工作](http://x.com/1)**" in digest
         assert digest.count("http://x.com/1") == 1
         # 正文不再重复图例（⚠️/💡 只在标题出现）
@@ -681,7 +683,7 @@ class TestSelectStage:
         assert note == "今日均为常规报道"
 
     def test_select_prompt_defaults_to_one_and_caps_three(self, tmp_path):
-        """数量规则：默认只选 1 条，特别重要才扩到 2~3 条，硬上限 3。"""
+        """数量规则：默认只选 1 条，互不重复才扩到 2~3 条，硬上限 3。"""
         from family_os.plugins.news_digest import analyzer
 
         prompts = []
@@ -692,9 +694,10 @@ class TestSelectStage:
                 return '{"items":[]}'
 
         analyzer._stage_select(_mk_ctx(tmp_path, Rec()), [{"title": "x"}])
-        assert "大事可放 3 条" in prompts[0]
-        assert "全部放出来" in prompts[0]
         assert "最多 3 条" in prompts[0]
+        assert "1 条够格就只放 1 条" in prompts[0]
+        assert "2~3 条" in prompts[0]
+        assert "超过 3 条取最重要的 3 条" in prompts[0]
 
     def test_select_output_capped_at_three(self, tmp_path):
         from family_os.plugins.news_digest import analyzer
@@ -727,8 +730,9 @@ class TestSelectStage:
             "summary": "2026长三角国际青年电影周在浙江宁波举办"}) is False
         # 论坛/峰会
         assert A._is_qualified_news({"title": "某国际人工智能论坛在京召开"}) is False
-        # 展会（广交会等交易会，标题带「出口/增长」数据词也算活动）
-        assert A._is_qualified_news({"title": "从单品到成套供给 广交会家居外贸跑出增长新曲线"}) is False
+        # 2026-11-01：广交会属头部产业大会，已纳入监控（单列「产业大会」类别）
+        assert A._is_qualified_news({
+            "title": "从单品到成套供给 广交会家居外贸跑出增长新曲线"}) is True
         # 官方数据（标题含同比/出口）
         assert A._is_qualified_news({"title": "9月CPI同比上涨1.8%"}) is True
         # 无任何官方/数据痕迹
@@ -782,7 +786,8 @@ class TestSelectStage:
         assert A._is_qualified_news({"title": "张伟：下半年经济将保持稳中向好"}) is False
         # 机构+冒号仍属发布口径，保留
         assert A._is_qualified_news({"title": "国家统计局：10月CPI同比上涨1.8%"}) is True
-        assert A._is_qualified_news({"title": "财政部：明年将实施更积极的财政政策"}) is True
+        # 2026-11-01：部门表态不是文件/会议/指标 → 不再够格
+        assert A._is_qualified_news({"title": "财政部：明年将实施更积极的财政政策"}) is False
         # 顶层会议不受影响
         assert A._is_qualified_news({
             "title": "中共中央政治局召开会议 分析研究2027年经济工作"}) is True
@@ -952,9 +957,10 @@ class TestSelectStage:
         assert "今日要闻（唯一事实来源）" in p
         assert "国办印发意见" in p
         assert "一律不许出现" in p
-        assert "普通个人/家庭" in p
-        assert "今日无直接可执行建议" in p
-        assert "未提供家庭情况" in p, "没有录入家庭信息时必须走普通口径"
+        assert "创业" in p and "职业" in p and "投资" in p, \
+            "建议口径必须是创业/职业/投资，而不是面向泛泛的普通人"
+        assert "今日无直接可用的创业/职业/投资动作" in p
+        assert "未提供个人情况" in p, "没有录入个人信息时必须走一般口径"
 
     def test_stage3_uses_family_facts_when_configured(self, tmp_path):
         """录入家庭情况后，建议要把这些信息带进提示词并要求结合。"""
@@ -998,7 +1004,7 @@ class TestSelectStage:
         p = prompts[0]
         assert "甲状腺结节" not in p
         assert "我的家庭/个人情况" not in p
-        assert "未提供家庭情况" in p
+        assert "未提供个人情况" in p
 
     def test_is_monetary_news_detection(self):
         """中国/美国的降息加息、降准、LPR、美联储议息都要触发黄金/股市说明。"""
@@ -1119,8 +1125,9 @@ class TestContentDedup:
         from family_os.plugins.news_digest import storage
         from family_os.plugins.news_digest.plugin import NewsDigest
 
-        # 预置历史指纹：昨天已解读过 "国务院部署稳增长工作"
-        storage.save_seen_titles(tmp_path, _d(1), ["国务院部署稳增长工作"])
+        # 预置历史指纹：昨天已解读过同一条政策文件
+        storage.save_seen_titles(
+            tmp_path, _d(1), ["国务院印发《关于促进民营经济发展壮大的意见》"])
 
         class GoodGW:
             def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
@@ -1307,8 +1314,10 @@ class TestRecentSelectedTopics:
         analyzer._stage_select(ctx,
                                [{"title": "新能源政策加码", "published": "2026-10-01"}])
         joined = "\n".join(prompts)
-        assert "政策性大新闻" in joined, "入选标准应收紧为政策性大新闻"
-        assert "加息" in joined and "降息" in joined, "应重点关注中美国加息降息"
+        assert "国家级信号" in joined, "入选标准应收紧为国家级/产业信号"
+        assert "创业" in joined and "职业" in joined and "投资" in joined, \
+            "入选理由必须落到创业/职业/投资"
+        assert "加息" in joined and "降息" in joined, "应重点关注中美加息降息"
         assert "美联储" in joined, "应关心中美货币政策"
         assert "中央经济工作会议" in joined, "应重点关注重要会议"
         assert "topic_key" in joined, "应要求 LLM 回传 topic_key 供落盘去重"
@@ -1392,11 +1401,8 @@ class TestRecentSelectedTopics:
         assert "经济日报：购房贷款贴息重在精准滴灌" in titles, \
             "同主题不同写法相似度低，应留给 LLM 语义去重"
 
-    def test_select_prompt_lists_policy_doc_priority(self, tmp_path):
-        """筛选提示词：五类并列重点（2026-10-10 由「三类」扩展而来）。
-
-        2026-10-10：保底机制整体移除后，五类重点完全由提示词覆盖承载。
-        """
+    def test_select_prompt_covers_four_categories(self, tmp_path):
+        """筛选提示词：四类信号（文件/会议/指标/产业大会），其余一律不选。"""
         from family_os.plugins.news_digest import analyzer
 
         prompts = []
@@ -1409,12 +1415,17 @@ class TestRecentSelectedTopics:
         analyzer._stage_select(_mk_ctx(tmp_path, Rec()),
                                [{"title": "x", "published": "2026-10-10"}])
         joined = "\n".join(prompts)
-        assert "顶层政策文件" in joined
+        assert "A·国家级重要文件发布" in joined
+        assert "B·国家级重要会议" in joined
+        assert "C·重要经济指标" in joined
+        assert "D·产业大会" in joined, "2026-11-01：产业大会纳入监控"
+        assert "不是政策信号" in joined, "产业大会要与政策信号区分"
+        assert "进博会" in joined and "广交会" in joined and "博鳌亚洲论坛" in joined
         assert "中共中央" in joined and "国务院" in joined
-        assert "发展新质生产力的意见" in joined, "应给出示例文件避免 LLM 漏选"
-        assert "必选关注重点" in joined
-        assert "部委级重大政策" in joined and "证监会" in joined
-        assert "重要经济数据发布" in joined and "CPI" in joined
+        assert "促进民营经济发展壮大的意见" in joined, "应给出示例文件避免 LLM 漏选"
+        assert "证监会" in joined and "发改委" in joined, "部委文件仍属国家级发布"
+        assert "CPI" in joined and "LPR" in joined
+        assert "党建党务" in joined and "纪检反腐" in joined, "党务/反腐必须明示排除"
 
     def test_no_force_include_helpers_left(self):
         """2026-10-10：全部规则保底已移除，五类重点只由提示词承载。"""
@@ -1698,15 +1709,15 @@ class TestSelectOnlyOfficialRelease:
                                [{"title": "整治付费实习灰色产业链",
                                  "published": "2026-10-13"}])
         joined = "\n".join(prompts)
-        assert "只认官方发布" in joined, "应加官方发布门槛"
         assert "发布主体" in joined and "文种" in joined, "应先核对发布主体与文种"
         assert "媒体评论" in joined and "深度报道" in joined and "调查报道" in joined, \
             "应明确排除媒体评论/深度报道/调查报道"
-        assert "整治" in joined and "付费实习" in joined, "应点名行业专项整治类不选"
-        assert "行业专项治理" in joined or "行业专项" in joined
+        assert "出口额" in joined and "进出口金额" in joined, \
+            "2026-11-01 用户点名：单条出口额/进出口金额不够格"
+        assert "党建党务" in joined and "纪检反腐" in joined
 
-    def test_select_prompt_keeps_six_priorities(self, tmp_path):
-        """加门槛后六类重点（2026-10-23 新增权威研究机构报告）不退化。"""
+    def test_select_prompt_drops_research_institute_category(self, tmp_path):
+        """2026-11-01：选题范围只认四类信号，研究机构报告仍不属于入选类别。"""
         from family_os.plugins.news_digest import analyzer
 
         prompts = []
@@ -1719,33 +1730,13 @@ class TestSelectOnlyOfficialRelease:
         analyzer._stage_select(_mk_ctx(tmp_path, Rec()),
                                [{"title": "x", "published": "2026-10-13"}])
         joined = "\n".join(prompts)
-        assert "政策性大新闻" in joined
         assert "加息" in joined and "降息" in joined and "美联储" in joined
         assert "中央经济工作会议" in joined
-        assert "顶层政策文件" in joined and "部委级重大政策" in joined
-        assert "重要经济数据发布" in joined and "CPI" in joined
-        assert "重点六" in joined and "权威研究机构报告" in joined
-        assert "社科院" in joined and "国务院发展研究中心" in joined
+        assert "CPI" in joined
         assert "topic_key" in joined
+        assert "权威研究机构" not in joined, "第六类研究机构报告已移出选题范围"
+        assert "蓝皮书" not in joined
         assert "近期已推送主题" not in joined, "去重指令仍应留在独立阶段"
-
-    def test_official_gate_accepts_research_institutes(self, tmp_path):
-        """只认官方发布不得把研究机构报告一并排除（2026-10-23）。"""
-        from family_os.plugins.news_digest import analyzer
-
-        prompts = []
-
-        class Rec:
-            def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
-                prompts.append(prompt)
-                return '{"items":[]}'
-
-        analyzer._stage_select(_mk_ctx(tmp_path, Rec()),
-                               [{"title": "x", "published": "2026-10-23"}])
-        joined = "\n".join(prompts)
-        assert "例外·权威研究机构" in joined
-        assert "蓝皮书" in joined and "年度报告" in joined
-        assert "转述、评论不单独入选" in joined, "媒体转述不得被当成机构发布"
 
 
 class TestMethodologyWiring:
@@ -1946,6 +1937,14 @@ class TestWebListSource:
         assert [i["title"] for i in items] == [
             "2026年第20期《求是》杂志发表习近平总书记重要文章"]
 
+    def test_pmi_title_not_treated_as_procurement(self, monkeypatch):
+        """「采购经理指数（PMI）」不能被事务性过滤词「采购」误杀（2026-11-01）。"""
+        fetcher = self._patch(monkeypatch, self._html([
+            ("2026年10月中国采购经理指数运行情况", self._href(1)),
+        ]))
+        items = fetcher._fetch_web_list(self._src())
+        assert [i["title"] for i in items] == ["2026年10月中国采购经理指数运行情况"]
+
     def test_no_title_include_keeps_all(self, monkeypatch):
         """未配置白词时不做标题过滤（社科院各所走栏目页，无需白词）。"""
         fetcher = self._patch(monkeypatch, self._html([
@@ -1953,6 +1952,68 @@ class TestWebListSource:
             ("研究文章乙标题足够长", self._href(1, 2)),
         ]))
         assert len(fetcher._fetch_web_list(self._src())) == 2
+
+
+class TestRssMaxAge:
+    """2026-11-01：RSS 源也支持按源配置 max_age_days。
+
+    部委/美联储这类「不定期发一次」的源，用全局 2 天窗会长期抓空；
+    未配置该字段的源行为保持不变（仍按 MAX_AGE_DAYS）。
+    """
+
+    @staticmethod
+    def _feed(days_ago: int) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        stamp = dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
+        return ('<?xml version="1.0"?><rss version="2.0"><channel>'
+                '<item><title>国务院印发《关于促进民营经济发展壮大的意见》</title>'
+                '<link>https://x/item</link>'
+                f'<pubDate>{stamp}</pubDate>'
+                '<description>' + '摘要' * 40 + '</description>'
+                '</item></channel></rss>')
+
+    def _patch(self, monkeypatch, xml):
+        from family_os.plugins.news_digest import fetcher
+
+        class _Resp:
+            def __init__(self, text):
+                self.text = text
+
+            def raise_for_status(self):
+                return None
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, *a, **k):
+                return _Resp(xml)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(fetcher.httpx, "Client", _Client)
+        monkeypatch.setattr(fetcher, "_fetch_body", lambda url: "")
+        return fetcher
+
+    def test_default_window_drops_old_item(self, monkeypatch):
+        fetcher = self._patch(monkeypatch, self._feed(4))
+        assert fetcher._fetch_source({"id": "x", "name": "X", "url": "http://x"}) == []
+
+    def test_per_source_window_keeps_older_item(self, monkeypatch):
+        fetcher = self._patch(monkeypatch, self._feed(4))
+        items = fetcher._fetch_source(
+            {"id": "x", "name": "X", "url": "http://x", "max_age_days": 7})
+        assert len(items) == 1
+        assert "民营经济" in items[0]["title"]
 
 
 class TestResearchSourceConfig:
@@ -1968,7 +2029,10 @@ class TestResearchSourceConfig:
 
     def test_three_cass_institutes_configured(self):
         ids = {s["id"] for s in self._web_list_sources()}
-        assert ids == {"cass_ie", "cass_gjs", "cass_iqte", "qstheory", "xinhua_politics"}
+        assert {"cass_ie", "cass_gjs", "cass_iqte", "qstheory",
+                "xinhua_politics"} <= ids
+        # 2026-11-01 实测新增的部委官方发布（无 RSS，走栏目页日期解析）
+        assert {"stats_release", "pbc_comm", "ndrc_notice", "mof_policy"} <= ids
 
     def test_qstheory_uses_title_whitelist(self):
         """求是网首页绝大多数是习近平活动报道，必须靠白词只看《求是》相关。"""
@@ -1993,68 +2057,73 @@ class TestResearchSourceConfig:
 
 
 class TestSelectCandidateWindow:
-    """2026-10-24：精选输入窗口不能只有「最新 20 条」。
+    """2026-11-01 重构：精选输入窗口按「选题范围」取样，不再按「最新 N 条」。
 
-    实测当日 194 篇，社科院/求是 13 篇全部落在最新 20 条之外 → 模型根本没看到，
-    误判「今日无合格新闻」。改为「最新 20 条 + 优先源最新 6 条」。
+    旧实现（最新 20 条 + 社科院/求是优先源名额 + 标题信号词）仍会把软新闻带进
+    LLM 视野，也会让「出口额」这类数量新闻有资格候选。现在只有命中四类信号的
+    候选进入提示词，且不受发布时间限制。
     """
 
     def _soft(self, n: int, hour: int = 20) -> dict:
         return {"title": f"软新闻{n}", "source_name": "新华社",
                 "url": f"https://x/{n}", "published": f"2026-10-24T{hour:02d}:{n:02d}:00"}
 
-    def _priority(self, n: int, day: int = 20) -> dict:
-        return {"title": f"社科院研究成果{n}", "source_name": "社科院经济研究所",
-                "url": f"https://cass/{n}", "published": f"2026-10-{day:02d}T00:00:00"}
-
-    def test_priority_item_outside_newest_window_is_included(self):
-        from family_os.plugins.news_digest import analyzer
-
-        articles = [self._soft(n) for n in range(25)] + [self._priority(1)]
-        picked = analyzer._pick_select_candidates(articles)
-        titles = [a["title"] for a in picked]
-        assert "社科院研究成果1" in titles, "优先源文章必须进入精选视野"
-        assert len(picked) == analyzer.SELECT_WINDOW + 1
-
-    def test_priority_quota_is_capped(self):
-        from family_os.plugins.news_digest import analyzer
-
-        articles = [self._soft(n) for n in range(25)] + [self._priority(n) for n in range(10)]
-        picked = analyzer._pick_select_candidates(articles)
-        assert len(picked) == analyzer.SELECT_WINDOW + analyzer.PRIORITY_QUOTA
-
     def _policy(self, n: int, day: int = 23) -> dict:
         return {"title": f"国务院印发意见{n}", "source_name": "新华社",
                 "url": f"https://p/{n}", "published": f"2026-10-{day:02d}T00:00:00"}
 
-    def test_policy_cue_item_outside_window_is_included(self):
-        """前一天的重要政策文件被今天软新闻挤出最新 20 条时，仍要靠信号词补进来。"""
+    def _meeting(self, day: int = 23) -> dict:
+        return {"title": "中共中央政治局召开会议 分析研究当前经济形势",
+                "source_name": "新华社", "url": "https://m/zzjj",
+                "published": f"2026-10-{day:02d}T00:00:00"}
+
+    def _indicator(self, day: int = 23) -> dict:
+        return {"title": "国家统计局：9月CPI同比上涨1.8%",
+                "source_name": "新华社", "url": "https://d/cpi",
+                "published": f"2026-10-{day:02d}T00:00:00"}
+
+    def test_only_in_scope_items_enter_window(self):
+        """软新闻/研究机构报告不再占用候选名额，只有四类信号进入 LLM 视野。"""
         from family_os.plugins.news_digest import analyzer
 
-        articles = [self._soft(n) for n in range(25)] + [self._policy(1)]
+        research = {"title": "社科院研究报告：现代化产业体系建设",
+                    "source_name": "社科院经济研究所", "url": "https://cass/1",
+                    "published": "2026-10-24T00:00:00"}
+        articles = [self._soft(n) for n in range(25)] + [
+            self._policy(1), self._meeting(), self._indicator(), research]
+        picked = analyzer._pick_select_candidates(articles)
+        titles = [a["title"] for a in picked]
+        assert "国务院印发意见1" in titles
+        assert "中共中央政治局召开会议 分析研究当前经济形势" in titles
+        assert "国家统计局：9月CPI同比上涨1.8%" in titles
+        assert "社科院研究报告：现代化产业体系建设" not in titles, \
+            "研究机构报告已移出选题范围"
+        assert all("软新闻" not in t for t in titles)
+
+    def test_in_scope_item_outside_newest_window_is_included(self):
+        """十天前的政策文件仍在候选里（不受「最新 20 条」限制）。"""
+        from family_os.plugins.news_digest import analyzer
+
+        articles = [self._soft(n) for n in range(25)] + [self._policy(1, day=14)]
         picked = analyzer._pick_select_candidates(articles)
         assert "国务院印发意见1" in [a["title"] for a in picked]
 
-    def test_policy_cue_ignores_party_building_titles(self):
-        """党建/理论标题不得被政策信号词桶拉进候选（「意见」等泛词已移除）。"""
+    def test_scope_quota_is_capped(self):
         from family_os.plugins.news_digest import analyzer
 
-        assert analyzer._has_policy_cue(
-            {"title": "习近平党建思想对解决大党独有难题的理论贡献与实践指引"}) is False
-        assert analyzer._has_policy_cue(
-            {"title": "国务院办公厅印发《关于适应人工智能技术发展助力构建就业友好型"
-                      "发展方式的意见》"}) is True
-
-    def test_old_non_priority_items_still_excluded(self):
-        from family_os.plugins.news_digest import analyzer
-
-        old_soft = {"title": "十天前的旧软新闻", "source_name": "中国新闻网",
-                    "url": "https://x/old", "published": "2026-10-14T00:00:00"}
-        articles = [self._soft(n) for n in range(25)] + [old_soft]
+        articles = [self._policy(n) for n in range(40)]
         picked = analyzer._pick_select_candidates(articles)
-        assert "十天前的旧软新闻" not in [a["title"] for a in picked]
+        assert len(picked) == analyzer.SCOPE_QUOTA
 
-    def test_select_prompt_receives_priority_item(self, tmp_path):
+    def test_falls_back_to_latest_when_no_scope_item(self):
+        """一条都不在范围内时退回最新窗口，让 LLM 能给出「今日无合格新闻」的理由。"""
+        from family_os.plugins.news_digest import analyzer
+
+        articles = [self._soft(n) for n in range(25)]
+        picked = analyzer._pick_select_candidates(articles)
+        assert len(picked) == analyzer.SELECT_WINDOW
+
+    def test_select_prompt_receives_in_scope_item(self, tmp_path):
         from family_os.plugins.news_digest import analyzer
 
         prompts = []
@@ -2064,9 +2133,10 @@ class TestSelectCandidateWindow:
                 prompts.append(prompt)
                 return '{"items":[]}'
 
-        articles = [self._soft(n) for n in range(25)] + [self._priority(1)]
+        articles = [self._soft(n) for n in range(25)] + [self._policy(1)]
         analyzer._stage_select(_mk_ctx(tmp_path, Rec()), articles)
-        assert "社科院研究成果1" in prompts[0]
+        assert "国务院印发意见1" in prompts[0]
+        assert "软新闻0" not in prompts[0], "范围外的软新闻不应进入精选提示词"
 
 
 class TestSourceDisplayNames:
@@ -2114,3 +2184,170 @@ class TestSourceDisplayNames:
         names = self._names()
         for keep in ("中国新闻网-财经", "中国新闻网-时政", "中国新闻网-国际"):
             assert keep in names, f"编辑栏目被误删：{keep}"
+
+
+class TestScope:
+    """2026-11-01 选题范围：只为创业/职业/投资服务，只认四类信号。
+
+    用户的原始口径：
+      · 只关注国家级重要文件发布（如国务院发布文件）、国家级重要会议（政治局
+        会议、经济会议等）、重要经济指标（央行加息/美国降息/CPI 等）；
+      · 2026-11-01 追加：进博会/广交会等头部产业大会也纳入监控，但单列
+        「产业大会」，不当作政策信号；
+      · 党建类、反腐政治类不考虑；
+      · 「出口额度」这类数量信息不够格入选。
+    """
+
+    def test_policy_docs_are_in_scope(self):
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            ("中共中央 国务院印发《关于促进民营经济发展壮大的意见》", "policy_doc"),
+            ("国务院办公厅印发《关于适应人工智能技术发展助力构建就业友好型"
+             "发展方式的意见》", "policy_doc"),
+            ("李强签署国务院令 公布《事业单位登记管理条例》", "policy_doc"),
+            ("国家发展改革委印发《对外投资管理办法》", "policy_doc"),
+        ]
+        for title, want in cases:
+            assert scope.classify(title) == want, f"{title!r} → {scope.classify(title)!r}"
+
+    def test_meetings_are_in_scope(self):
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "中共中央政治局召开会议 分析研究当前经济形势和经济工作",
+            "中央经济工作会议在北京举行",
+            "国务院常务会议部署稳就业稳外贸举措",
+            "全国两会审议政府工作报告",
+            "二十届三中全会审议通过《决定》",
+            "中央财经委员会第六次会议研究部署工作",
+        ]
+        for title in cases:
+            assert scope.classify(title) == "meeting", f"{title!r}"
+
+    def test_indicators_are_in_scope(self):
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "央行宣布降准0.5个百分点",
+            "美联储宣布降息25个基点",
+            "9月CPI同比上涨1.8%",
+            "8月制造业PMI回升至50.2%",
+            "前三季度GDP同比增长4.8%",
+        ]
+        for title in cases:
+            assert scope.classify(title) == "indicator", f"{title!r}"
+
+    def test_party_and_anti_corruption_excluded(self):
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "中共中央关于持之以恒推进全面从严治党若干重大问题的决定",
+            "中央纪委国家监委部署党风廉政建设重点工作",
+            "某省巡视整改工作动员会召开",
+            "主题教育读书班开班",
+            "求是杂志发表重要文章：论党的自我革命",
+        ]
+        for title in cases:
+            assert scope.classify(title) is None, f"{title!r} 应被排除"
+
+    def test_trade_volume_news_excluded(self):
+        """用户点名：单条出口额/进出口金额这类数量新闻不够格。"""
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "前三季度我国出口额12.8万亿元 同比增长6.2%",
+            "出口首破8万亿：新字挑大梁",
+            "10月进出口总额同比增长4.5%",
+            "某省前三季度外贸出口增长9%",
+        ]
+        for title in cases:
+            assert scope.classify(title) is None, f"{title!r} 应被排除"
+
+    def test_local_activities_and_media_columns_excluded(self):
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "浙江前三季度GDP达73224亿元 同比增长5.6%",
+            "河北省第十四届人民代表大会常务委员会公告",
+            "某市举办智能家居产业博览会",
+            "中国经济面面观｜出口首破8万亿",
+            "AI重构电影生产逻辑（长三角青年电影周举办）",
+            "张伟：下半年经济将保持稳中向好",
+        ]
+        for title in cases:
+            assert scope.classify(title) is None, f"{title!r} 应被排除"
+
+    def test_industry_events_are_in_scope(self):
+        """2026-11-01：进博会/广交会等头部产业大会纳入监控，单列「产业大会」。"""
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "第九届进博会开幕 意向成交额创新高",
+            "第138届广交会闭幕 累计成交额同比增长",
+            "2026年服贸会在北京开幕 聚焦服务贸易",
+            "2026世界人工智能大会在上海开幕",
+            "2026世界互联网大会乌镇峰会举行",
+            "博鳌亚洲论坛2026年年会开幕",
+            "中国发展高层论坛2026年年会召开",
+            "夏季达沃斯论坛在天津举行",
+        ]
+        for title in cases:
+            assert scope.classify(title) == "industry_event", f"{title!r}"
+
+    def test_industry_event_previews_excluded(self):
+        """会前预告/筹备稿只算宣传，不是大会本身的产出。"""
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "关于举办2026世界人工智能大会高峰论坛的通知",
+            "第九届进博会将于11月5日举办",
+        ]
+        for title in cases:
+            assert scope.classify(title) is None, f"{title!r} 应被排除"
+
+    def test_research_reports_and_monetary_ops_excluded(self):
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "社科院发布2026年经济蓝皮书",
+            "中国央行设立债市非银大额赎回互换便利",
+            "央行开展1.2万亿元逆回购操作",
+        ]
+        for title in cases:
+            assert scope.classify(title) is None, f"{title!r} 应被排除"
+
+    def test_meeting_wins_over_party_wording(self):
+        """政治局会议审议巡视报告仍是重要会议，不能被「巡视」一词误杀。"""
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(
+            "中共中央政治局召开会议 审议《关于二十届中央巡视情况的报告》"
+        ) == "meeting"
+
+    def test_summary_can_prove_official_release(self):
+        """标题平淡（未写发布主体），摘要写明发改委发布 → 仍算重要文件。"""
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(
+            "护航对外投资高质量发展，新办法12月1日起施行",
+            "国家发展改革委公布《对外投资管理办法》，自12月1日起施行",
+        ) == "policy_doc"
+
+    def test_indicator_can_come_from_summary(self):
+        """标题只写「发布国民经济运行情况」，指标名在摘要里 → 仍算重要指标。"""
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(
+            "国家统计局发布前三季度国民经济运行情况",
+            "前三季度GDP同比增长4.8%，CPI同比上涨0.6%",
+        ) == "indicator"
+
+    def test_label_mapping(self):
+        from family_os.plugins.news_digest import scope
+
+        assert scope.label("policy_doc") == "重要文件"
+        assert scope.label("meeting") == "重要会议"
+        assert scope.label("indicator") == "经济指标"
+        assert scope.label("industry_event") == "产业大会"
+        assert scope.label(None) == ""

@@ -225,7 +225,8 @@ class NewsDigest(Skill):
                          + self._dedup_lines(stage2))
         if result.get("stage3", "").strip():
             # 2026-09-29：只保留第一条 💡 建议，确保「一句话建议」只有一条
-            lines.append("\n### 💡 老百姓一句话建议\n"
+            # 2026-11-01：建议口径改为创业/职业/投资
+            lines.append("\n### 💡 对创业·职业·投资的建议\n"
                          + self._first_advice(result["stage3"]))
         return "\n".join(lines)
 
@@ -325,6 +326,8 @@ class NewsDigest(Skill):
                 "source": (it.get("source_name") or "").strip(),
                 "title": title,
                 "url": (it.get("url") or "").strip(),
+                # 分类标签：重要文件 / 重要会议 / 经济指标（scope 回填，确定性判定）
+                "category": (it.get("category") or "").strip(),
                 "summary": " ".join((it.get("summary") or "").split()),
                 "reason": " ".join((it.get("reason") or "").split()),
             })
@@ -360,6 +363,7 @@ class NewsDigest(Skill):
             if not title:
                 continue
             src = NewsDigest._short_source(it.get("source_name") or "")
+            cat = (it.get("category") or "").strip()
             url = (it.get("url") or "").strip()
             summary = " ".join((it.get("summary") or "").split())
             reason = " ".join((it.get("reason") or "").split())
@@ -371,8 +375,13 @@ class NewsDigest(Skill):
 
             head = f"**[{title}]({url})**" if url else f"**{title}**"
             block = f"{i}. {head}"
-            if src:
+            # 分类（重要文件/重要会议/经济指标）与来源同排，便于一眼看出信号类型
+            if cat and src:
+                block += f"\n   分类：{cat}｜来源：{src}"
+            elif src:
                 block += f"\n   来源：{src}"
+            elif cat:
+                block += f"\n   分类：{cat}"
             if summary:
                 block += f"\n   {summary}"
             if reason:

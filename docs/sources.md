@@ -26,7 +26,7 @@ sources:
 | `type` | `rss`（标准订阅源）；`web_list`（列表页 HTML，需 `link_pattern`）；`web_page`（单页正文） |
 | `link_pattern` | `web_list` 必填，用正则从列表页提取文章链接 |
 | `title_include` | 只保留标题包含该词的文章（如「通知」「公布」），用来压噪 |
-| `max_age_days` | 只抓最近 N 天（默认 2~3，避免旧文混入） |
+| `max_age_days` | 只抓最近 N 天（默认 2~3，避免旧文混入）；RSS 与 `web_list` 均支持按源配置 |
 | `weight` | 排序权重，`0.9` 用于最高优先级源（社科院、求是等） |
 | `category` | 仅作分组展示，不影响筛选 |
 

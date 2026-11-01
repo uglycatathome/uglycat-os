@@ -145,6 +145,61 @@ sources:
   tags:
   - 新闻
   default_sensitivity: public
+- id: stats_release
+  name: 国家统计局
+  type: web_list
+  list_url: https://www.stats.gov.cn/sj/zxfb/
+  link_pattern: t(20\d{2})(\d{2})(\d{2})_
+  max_age_days: 3
+  max_items: 6
+  tags:
+  - 新闻
+  default_sensitivity: public
+- id: pbc_comm
+  name: 中国人民银行
+  type: web_list
+  list_url: http://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  link_pattern: (20\d{2})(\d{2})(\d{2})[0-9]{6,}/index\.html
+  max_age_days: 3
+  max_items: 6
+  tags:
+  - 新闻
+  default_sensitivity: public
+- id: ndrc_notice
+  name: 国家发展改革委
+  type: web_list
+  list_url: https://www.ndrc.gov.cn/xxgk/zcfb/tz/
+  link_pattern: t(20\d{2})(\d{2})(\d{2})_
+  max_age_days: 3
+  max_items: 6
+  tags:
+  - 新闻
+  default_sensitivity: public
+- id: mof_policy
+  name: 财政部
+  type: web_list
+  list_url: https://www.mof.gov.cn/zhengwuxinxi/zhengcefabu/
+  link_pattern: t(20\d{2})(\d{2})(\d{2})_
+  max_age_days: 5
+  max_items: 5
+  tags:
+  - 新闻
+  default_sensitivity: public
+- id: rsshub_csrc
+  name: 证监会
+  url: https://rss.injahow.cn/gov/csrc/news
+  max_age_days: 3
+  tags:
+  - 新闻
+  default_sensitivity: public
+- id: fed_press
+  name: 美联储
+  url: https://www.federalreserve.gov/feeds/press_all.xml
+  max_age_days: 3
+  max_items: 10
+  tags:
+  - 新闻
+  default_sensitivity: public
 - id: 36kr
   name: 36氪
   url: https://36kr.com/feed

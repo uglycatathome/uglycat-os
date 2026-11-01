@@ -1,7 +1,7 @@
 [project]
 name = "uglycat-os"
-version = "0.1.0"
-description = "每日新闻解读助手：公开新闻抓取 → 官方措辞解读 → 普通人一句话建议"
+version = "0.1.1"
+description = "每日新闻解读助手：公开新闻抓取 → 四类信号精选 → 官方措辞解读 → 决策建议"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
