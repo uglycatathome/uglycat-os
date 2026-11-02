@@ -2,6 +2,26 @@
 
 本文件是机器可执行指令，不是介绍文档。**始终按下面顺序执行，用每步"判据"决定是否继续。**
 
+## 项目结构（先读）
+
+```
+uglycat-os/
+├── run.py                    CLI 入口（run / doctor / news / install-schedule / catch-up）
+├── family_os/
+│   ├── kernel/               内核：配置 / 调度 / LLM 网关 / 通知 / 存储 / 插件发现
+│   ├── plugins/news_digest/  唯一开源插件：抓取 → 去重 → 四类信号精选 → 解读
+│   └── config/               config.yaml（调度与模型）· sources.yaml（新闻源）
+├── tests/                    内核与新闻插件的回归测试
+├── docs/                     架构 / 新闻源 / 提示词 / 通知 / 插件开发 / 部署
+├── examples/                 示例推送、最小插件
+├── install/                  setup.sh / setup.ps1
+└── prompts/                  可选：用户自定义提示词（不随升级覆盖）
+```
+
+- 代码在**仓库根目录**（不是 `app/`，与上游私有版本的布局不同）；`./uglycat` 启动器会自动 cd 到根目录。
+- 运行时数据在 `data/`（gitignored）：`family.db`、`history/news_digest/<日期>/`、`inbox/*.md`。
+- 新闻选题范围由 `family_os/plugins/news_digest/scope.py` 决定（四类信号：重要文件 / 重要会议 / 重要经济指标 / 产业大会），提示词只能在范围内调口径。
+
 ## 支持环境
 
 | 系统 | 最低版本 | 说明 |
@@ -78,6 +98,16 @@ Python 必须 >= 3.11。优先使用 `uv`，没有则用 `python -m venv`。
    ```
 
    判据：输出包含"已写入/已执行"。机器睡眠错过时间后，执行 `./uglycat catch-up` 补跑当天。
+
+## 部署方式
+
+- **本地优先（默认，无需服务器）**：安装后手动 `./uglycat run news_digest --notify` 即可；
+  需要每天自动推送就 `./uglycat install-schedule --time 08:00`（Windows 任务计划 / macOS launchd /
+  Linux cron 由安装脚本自动选择）；机器睡眠错过则 `./uglycat catch-up` 补跑当天。
+- **可选：常驻服务器**：把仓库放到任意 Linux 主机，`install/setup.sh` 后用系统 cron 或 systemd
+  调用 `./uglycat run news_digest --notify`，步骤见 `docs/deploy-vm.md`。
+- **升级不覆盖个人内容**：`git pull` 只更新代码与默认规则；`.env`、`data/`、`prompts/`、
+  `family_os/config/sources.local.yaml` 都不会被覆盖（见 README「升级与自定义」）。
 
 ## 后续可按用户要求做的两件事
 
