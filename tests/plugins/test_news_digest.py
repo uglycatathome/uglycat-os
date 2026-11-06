@@ -459,6 +459,27 @@ class TestSelected:
         from family_os.plugins.news_digest.plugin import NewsDigest
         return NewsDigest()
 
+    def test_selected_uses_short_title(self):
+        """渲染优先用 title_short；缺失时自动压缩，不再硬截到 40 字。"""
+        plugin = self._mk_plugin()
+        out = plugin._format_selected([{
+            "title": "国务院关于金融工作情况的报告——2026年11月3日在十四届全国"
+                     "人民代表大会常务委员会第三十次会议上",
+            "title_short": "国务院金融工作情况报告",
+            "url": "http://x.com/1", "source_name": "中国人民银行",
+            "category": "重要会议", "summary": "s", "reason": "r",
+        }])
+        assert "[国务院金融工作情况报告]" in out
+        assert "人民代表大会" not in out
+
+        out2 = plugin._format_selected([{
+            "title": "国务院关于金融工作情况的报告——2026年11月3日在十四届全国"
+                     "人民代表大会常务委员会第三十次会议上",
+            "url": "http://x.com/1", "source_name": "中国人民银行",
+            "category": "重要会议", "summary": "s", "reason": "r",
+        }])
+        assert "[国务院关于金融工作情况的报告]" in out2
+
     def test_selected_renders_link_summary_reason(self):
         selected = [{
             "title": "国务院部署稳增长工作", "url": "http://x.com/1",
@@ -549,19 +570,21 @@ class TestSelected:
         assert "⚠️ 新提法" not in digest and "💡建议一句话" not in digest
 
     def test_digest_includes_market_impact_for_rate_news(self):
-        """利率类新闻要单独一节说明对黄金/股市的影响。"""
+        """利率/关键指标要单独一节说明对黄金与股市的影响（含传导链条）。"""
         plugin = self._mk_plugin()
         result = {
             "selected": [{"title": "央行降准0.25个百分点", "url": "http://x.com/1",
                           "source_name": "测试", "summary": "释放长期资金", "reason": "流动性"}],
             "select_mode": "llm",
-            "market_impact": "黄金：通常偏强\n股市：流动性改善\n建议：分批定投，不加杠杆",
+            "market_impact": "【第1条】\n链条：降准 → 资金利率下行 → 黄金与成长股偏多\n"
+                             "黄金：通常偏强\n股市：流动性改善",
             "stage1": "【核心判断】…", "stage2": "", "stage3": "💡建议",
         }
         digest = plugin._assemble_digest("2026-10-25", [{"title": "t"}], result)
-        assert "### 📈 利率变化对黄金与股市的影响" in digest
-        assert digest.index("### 📌 今日要闻") < digest.index("### 📈 利率变化")
-        assert "黄金：通常偏强" in digest and "分批定投" in digest
+        assert "### 📈 关键指标对黄金与股市的影响" in digest
+        assert digest.index("### 📌 今日要闻") < digest.index("### 📈 关键指标")
+        assert "链条：降准 → 资金利率下行" in digest
+        assert "黄金：通常偏强" in digest
 
     def test_digest_empty_mode_no_analysis(self):
         plugin = self._mk_plugin()
@@ -1437,8 +1460,31 @@ class TestRecentSelectedTopics:
                      "_ministry_doc_hit", "_econ_data_hit", "_policy_subject"):
             assert not hasattr(analyzer, name), f"{name} 应已移除"
 
-    def test_llm_selected_meeting_is_the_only_way_in(self, tmp_path):
-        """无保底：会议/利率/数据类新闻只有被 LLM 精选才会进入 selected。"""
+    def test_no_force_include_for_ordinary_news(self, tmp_path):
+        """普通信号（会议/文件/产业大会）仍无保底：LLM 空选即空选。"""
+        from family_os.plugins.news_digest import analyzer
+
+        articles = [
+            {"title": "中共中央政治局会议分析研究当前经济形势",
+             "source_name": "源", "summary": "部署经济工作", "published": "2026-10-10"},
+        ]
+
+        class PickNone:
+            def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
+                assert "精选" in prompt
+                return '{"items":[],"note":"均与近期重复"}'
+
+        res = analyzer.run_pipeline(_mk_ctx(tmp_path, PickNone()), articles, {},
+                                    tmp_path)
+        assert res["selected"] == [], "普通信号无保底：LLM 空选时不得强制补入"
+        assert res["select_mode"] == "empty"
+
+    def test_mandatory_indicators_force_included(self, tmp_path):
+        """必须关注指标是「无保底」的例外：LLM 空选也要入选（2026-11-05 用户要求）。
+
+        美国非农/CPI/FOMC、中国社融·信贷/CPI/PPI/PMI、LPR 是黄金与股市的直接输入，
+        命中即强制入选；普通会议/文件仍不保底。
+        """
         from family_os.plugins.news_digest import analyzer
 
         articles = [
@@ -1452,27 +1498,21 @@ class TestRecentSelectedTopics:
 
         class PickNone:
             def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
-                assert "精选" in prompt
-                return '{"items":[],"note":"均与近期重复"}'
+                if "精选" in prompt:
+                    return '{"items":[],"note":"均与近期重复"}'
+                if "输出 JSON" in prompt:
+                    return '{"items":[{"thread":"宏观","key_phrases":["降息"]}]}'
+                return "解读"
 
         res = analyzer.run_pipeline(_mk_ctx(tmp_path, PickNone()), articles, {},
                                     tmp_path)
-        assert res["selected"] == [], "无保底：LLM 空选时不得有任何强制补入"
-        assert res["select_mode"] == "empty"
-
-        class PickOne:
-            def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
-                if "精选" in prompt:
-                    return ('{"items":[{"title":"美联储宣布降息25个基点",'
-                            '"summary":"s","reason":"r","topic_key":"美联储降息"}]}')
-                if "输出 JSON" in prompt:
-                    return '{"items":[{"thread":"宏观","key_phrases":["降息"]}]}'
-                return "解读\n💡建议"
-
-        res2 = analyzer.run_pipeline(_mk_ctx(tmp_path, PickOne()), articles, {},
-                                     tmp_path)
-        assert [it["title"] for it in res2["selected"]] == ["美联储宣布降息25个基点"], \
-            "仅 LLM 精选的一条入选，其余两条不因\"重要\"被自动补入"
+        titles = [it["title"] for it in res["selected"]]
+        assert "美联储宣布降息25个基点" in titles, "利率决策必须入选"
+        assert "统计局：9月份CPI同比上涨0.4%" in titles, "CPI 必须入选"
+        assert "中共中央政治局会议分析研究当前经济形势" not in titles, \
+            "会议不在必选清单内，仍不保底"
+        assert all("必须关注指标" in it["reason"] for it in res["selected"])
+        assert res["select_mode"] == "llm", "必选指标把空选变成有选"
 
     def test_meeting_registry_is_three_tuple_for_archive_only(self):
         """会议登记表降为三元组（正则/key/名），仅用于归档。"""
@@ -2343,6 +2383,193 @@ class TestScope:
             "前三季度GDP同比增长4.8%，CPI同比上涨0.6%",
         ) == "indicator"
 
+    def test_new_ministries_from_policy_library(self):
+        """2026-11-03：接入 gov.cn 部门文件库后补齐的部委，不能被判「非国家级发布」。
+
+        这三家（民政部/文化和旅游部/国家铁路局）在原白名单里缺席，实测其正规
+        全国性文件会被整条丢弃。
+        """
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "民政部 全国老龄办 中国老龄协会关于深入开展特殊困难老年人探访关爱服务的通知",
+            "文化和旅游部关于印发《文化产业发展“十五五”规划》的通知",
+            "国家铁路局关于印发《铁路科技创新“十五五”规划》的通知",
+            "自然资源部 农业农村部 国家林业和草原局关于完善设施农用地管理的通知",
+        ]
+        for title in cases:
+            assert scope.classify(title) == "policy_doc", f"{title!r}"
+
+    def test_issuing_body_in_summary_proves_official_release(self):
+        """标题/正文里没有部委名，但摘要带「发布机构｜文号」→ 仍算重要文件。
+
+        对应 gov.cn 部门文件库的真实形态：「关于印发《城乡义务教育补助经费管理
+        办法》的通知」标题里根本没有财政部/教育部，只有 puborg 字段才知道发文单位。
+        """
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(
+            "关于印发《城乡义务教育补助经费管理办法》的通知",
+            "财政部 教育部｜财教〔2026〕195号｜各省、自治区、直辖市财政厅（局）…",
+        ) == "policy_doc"
+
+    def test_party_work_reports_excluded_before_meeting(self):
+        """党务工作稿（党组/党委的学习传达）必须在「重要会议」之前排除。
+
+        2026-11-03 实测：这类标题常把「二十届五中全会」写进标题，先走会议判定就会
+        被误判成重要会议推到家庭群（发改委/外汇局党组稿均踩过）。
+        """
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "中共国家发展改革委党组召开扩大会议传达学习贯彻党的二十届五中全会精神",
+            "国家外汇管理局党组传达学习党的二十届五中全会精神",
+            "国家发展改革委党组理论学习中心组开展集体研讨",
+            "某部委党委召开扩大会议 传达学习中央经济工作会议精神",
+            "关于学习贯彻党的二十届五中全会精神的通知",
+        ]
+        for title in cases:
+            assert scope.classify(title) is None, f"{title!r} 应被排除"
+
+    def test_party_meeting_still_wins_without_party_organ(self):
+        """去掉党组字样后，政治局会议/中央经济工作会议仍要判为重要会议。"""
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(
+            "中共中央政治局召开会议 分析研究当前经济形势和经济工作") == "meeting"
+        assert scope.classify("中央经济工作会议在北京举行") == "meeting"
+
+    def test_cn_region_indicators_excluded(self):
+        """台港澳口径的 CPI 不是「中国 CPI」：既不入选，更不能强制入选。
+
+        2026-11-06 生产事故：中新社「台湾CPI连续六个月突破通胀警戒线」被
+        mandatory_label 判成「中国CPI」强制推送——scope.classify 一侧因台港澳
+        属地区口径返回 None，两条口径不一致，强制入选绕过了这道门。
+        """
+        from family_os.plugins.news_digest import scope
+
+        for title in ("台湾CPI连续六个月突破通货膨胀警戒线",
+                      "台湾10月CPI同比增长2.33%",
+                      "香港9月CPI同比上升1.4%",
+                      "澳门CPI连续三个月回落"):
+            assert scope.classify(title) is None, title
+            assert scope.mandatory_label(title) is None, title
+        # 全国口径与美国口径不受影响
+        assert scope.mandatory_label("中国10月CPI同比上涨0.3%") == "中国CPI"
+        assert scope.mandatory_label("美国9月CPI同比上涨2.4%") == "美国CPI"
+
+    def test_fed_official_voice_not_decision(self):
+        """美联储官员个人表态不是 FOMC 决议（2026-11-06 用户点名）。
+
+        「Hammack称利率需升至限制性水平，倾向于更频繁、小幅加息」曾被当成
+        经济指标入选——它只是官员观点，不是正式发布。带「宣布/决议/议息/纪要」
+        的才算决策。
+        """
+        from family_os.plugins.news_digest import scope
+
+        for t in ("美联储鹰声再起！Hammack称利率需升至限制性水平，倾向于更频繁、小幅加息",
+                  "美联储官员：不排除年内再次加息",
+                  "联储行长表示通胀仍未回到目标",
+                  "美联储官员称利率应维持不变",
+                  "联储票委：倾向于按兵不动"):
+            assert scope.classify(t) is None, t
+            assert scope.mandatory_label(t) is None, t
+
+        # 真正的决议仍然入选（「宣布/决议」是决策动作）；结果描述词
+        # 「维持利率/按兵不动」不算决策动作，但也不能误杀正式决议报道。
+        for t in ("美联储宣布降息25个基点",
+                  "美联储主席鲍威尔宣布降息25个基点"):
+            assert scope.classify(t) == "indicator", t
+            assert scope.mandatory_label(t) == "FOMC决议", t
+        assert scope.classify("美联储利率决议维持不变，按兵不动") == "indicator"
+
+    def test_rumor_and_bulk_repeal_excluded(self):
+        """传闻/小道消息、行政法规打包清理都不入选（2026-11-06 用户点名）。
+
+        前者不是正式发布的数据；后者是立改废释的程序性动作，对经济没有直接影响。
+        """
+        from family_os.plugins.news_digest import scope
+
+        for t in ("传闻：某地将于下月全面取消限购",
+                  "消息人士称监管将收紧房贷",
+                  "网传某银行暂停二手房贷款",
+                  "国务院关于修改和废止部分行政法规的决定",
+                  "国务院关于废止部分行政法规的决定"):
+            assert scope.classify(t) is None, t
+
+    def test_short_title_compresses_long_headline(self):
+        """长标题要压成可读短标题，不能硬截在「…全国人民代表大会常…」处。
+
+        2026-11-06 用户反馈：推送标题被 40 字硬截断，读不出重点。
+        """
+        from family_os.plugins.news_digest import analyzer
+
+        long = ("国务院关于金融工作情况的报告——2026年11月3日在十四届全国"
+                "人民代表大会常务委员会第三十次会议上")
+        assert analyzer.short_title(long) == "国务院关于金融工作情况的报告"
+        short = "美联储宣布降息25个基点"
+        assert analyzer.short_title(short) == short
+        # 没有分隔符时按标点断，且不超过 limit+省略号
+        t = analyzer.short_title("中国10月RatingDog制造业PMI为52，连续11个月扩张", 20)
+        assert len(t) <= 21 and t.endswith("…")
+
+    def test_ideology_and_united_front_excluded(self):
+        """意识形态/统战口径的文件不该混进 policy_doc（此前靠「意见/条例」漏网）。"""
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "关于加强新时代意识形态工作的意见",
+            "关于印发《统一战线工作条例》的通知",
+            "巩固发展最广泛的爱国统一战线",
+        ]
+        for title in cases:
+            assert scope.classify(title) is None, f"{title!r} 应被排除"
+
+    def test_policy_doc_wins_over_event_words(self):
+        """政策文件标题里可能带「赛事/论坛」等活动中性词，不能整条被活动排除误杀。
+
+        2026-11-03 修：「国务院办公厅关于发展体育赛事激发消费活力的意见」原本被
+        `_EVENT_RE` 的「赛事」判为活动类丢弃（而它是正经国办文件）。修法是让制度
+        文件判定先于活动排除；真正的活动通知仍要拦住。
+        """
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(
+            "国务院办公厅关于发展体育赛事激发消费活力的意见") == "policy_doc"
+        # 活动通知不能借「文种词 + 国家级主体」混成文件（关于举办…）
+        assert scope.classify("关于举办2026世界人工智能大会高峰论坛的通知") is None
+        # 地方版本仍按地方信息排除
+        assert scope.classify("河北省关于发展体育赛事激发消费活力的实施意见") is None
+        # 无发布主体的普通活动稿仍排除
+        assert scope.classify("某市举办智能家居产业博览会") is None
+
+    def test_resource_stock_reports_excluded(self):
+        """自然资源「家底」类面积盘点不算指标（2026-11-04 用户点名：对我没意义）。
+
+        典型形态：「国务院报告：截至2025年底中国国有土地总面积52360.4万公顷」——
+        是权威数据，但对创业/职业/投资没有决策增量。
+        """
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(
+            "国务院报告：截至2025年底中国国有土地总面积52360.4万公顷",
+            "报告显示，截至2025年底，全国国有土地总面积52360.4万公顷。"
+            "其中，国有耕地1998.8万公顷，国有建设用地1884.5万公顷。") is None
+        # 真正的政策文件不能被这条排除误伤
+        assert scope.classify(
+            "自然资源部 农业农村部 国家林业和草原局关于完善设施农用地管理的通知"
+        ) == "policy_doc"
+        assert scope.classify("国务院办公厅关于加强耕地保护提升耕地质量的意见"
+                              ) == "policy_doc"
+
+    def test_reserve_ratio_abbreviation_is_indicator(self):
+        """「存准率」缩写也要认——只认「存款准备金率」会漏掉真实的货币政策操作。"""
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(
+            "央行上调外汇存准率，人民币单日贬值超300点",
+            "央行宣布自11月15日起将外汇存款准备金率由4%上调至6%。") == "indicator"
+
     def test_label_mapping(self):
         from family_os.plugins.news_digest import scope
 
@@ -2351,3 +2578,391 @@ class TestScope:
         assert scope.label("indicator") == "经济指标"
         assert scope.label("industry_event") == "产业大会"
         assert scope.label(None) == ""
+
+
+class TestJsonApiSource:
+    """2026-11-03：`type: json_api` —— 官方结构化检索接口取数通道。
+
+    动机：部委官网栏目页实测普遍不可抓（商务部 404、金融监管总局/人社部/工信部
+    JS 空壳、住建部 403），而中国政府网「政策文件库」接口返回结构化 JSON，一次
+    覆盖国务院与各部门的全国性文件。这里锁定三条不变量：
+
+    1. 按 type 正确分派（不会被当成 RSS 解析）；
+    2. 按 max_age_days 过滤发布时间（毫秒时间戳）；
+    3. 发布机构 + 文号并入摘要（否则 scope 判不出发文主体，整条被丢弃）。
+    """
+
+    @staticmethod
+    def _payload(rows):
+        return {"searchVO": {"listVO": rows}}
+
+    @staticmethod
+    def _row(days_ago: int = 0, **kw):
+        import time
+
+        ts = int((time.time() - days_ago * 86400) * 1000)
+        row = {
+            "title": "国务院办公厅关于适应人工智能技术发展助力构建就业友好型"
+                     "发展方式的意见",
+            "url": "https://www.gov.cn/zhengce/zhengceku/202610/content_1.htm",
+            "summary": "为促进高质量充分就业，经国务院同意，现提出如下意见。",
+            "pubtime": ts,
+            "pcode": "国办发〔2026〕29号",
+            "puborg": "国务院办公厅",
+        }
+        row.update(kw)
+        return row
+
+    def _patch(self, monkeypatch, payload, body=""):
+        from family_os.plugins.news_digest import fetcher
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return payload
+
+        monkeypatch.setattr(fetcher.httpx, "get", lambda *a, **k: _Resp())
+        monkeypatch.setattr(fetcher, "_fetch_body", lambda url: body)
+        return fetcher
+
+    def test_dispatched_as_json_not_rss(self, monkeypatch):
+        fetcher = self._patch(monkeypatch, self._payload([self._row()]))
+        items = fetcher._fetch_source({
+            "id": "gov_cn_gw", "name": "中国政府网-国务院文件",
+            "type": "json_api", "url": "https://x/api",
+            "items_path": "searchVO.listVO",
+        })
+        assert len(items) == 1
+        assert "就业友好型" in items[0]["title"]
+        assert items[0]["source_id"] == "gov_cn_gw"
+        assert items[0]["source_name"] == "中国政府网-国务院文件"
+        assert items[0]["published"].startswith("20")      # ISO 串，供后续排序/去重
+
+    def test_old_item_dropped_by_window(self, monkeypatch):
+        fetcher = self._patch(monkeypatch, self._payload([self._row(days_ago=10)]))
+        assert fetcher._fetch_source({
+            "id": "x", "type": "json_api", "url": "https://x/api",
+            "max_age_days": 3,
+        }) == []
+
+    def test_puborg_and_docno_merged_into_summary(self, monkeypatch):
+        fetcher = self._patch(monkeypatch, self._payload([
+            self._row(title="关于印发《城乡义务教育补助经费管理办法》的通知",
+                      summary="各省、自治区、直辖市财政厅（局）、教育厅（教委）：",
+                      pcode="财教〔2026〕195号", puborg="财政部 教育部"),
+        ]))
+        items = fetcher._fetch_source({
+            "id": "gov_cn_bm", "type": "json_api", "url": "https://x/api",
+        })
+        summary = items[0]["summary"]
+        assert "财政部 教育部" in summary, "发布机构未并入摘要 → scope 会误杀"
+        assert "财教〔2026〕195号" in summary, "文号未并入摘要"
+        assert summary.endswith("：") or "财政厅" in summary
+
+    def test_puborg_not_duplicated_when_already_in_summary(self, monkeypatch):
+        fetcher = self._patch(monkeypatch, self._payload([
+            self._row(puborg="国务院办公厅",
+                      summary="国务院办公厅关于促进就业的意见"),
+        ]))
+        items = fetcher._fetch_source({
+            "id": "x", "type": "json_api", "url": "https://x/api"})
+        assert items[0]["summary"].count("国务院办公厅") == 1
+
+    def test_malformed_payload_returns_empty(self, monkeypatch):
+        """接口结构变化时静默降级为空，不能让整轮抓取崩掉。"""
+        fetcher = self._patch(monkeypatch, {"code": 0})
+        assert fetcher._fetch_source({
+            "id": "x", "type": "json_api", "url": "https://x/api"}) == []
+
+    def test_short_title_skipped(self, monkeypatch):
+        fetcher = self._patch(monkeypatch, self._payload([
+            self._row(title="更多"), self._row()]))
+        items = fetcher._fetch_source({
+            "id": "x", "type": "json_api", "url": "https://x/api"})
+        assert len(items) == 1
+
+    def test_body_fetched_and_can_be_disabled(self, monkeypatch):
+        fetcher = self._patch(monkeypatch, self._payload([self._row()]), body="正文" * 50)
+        cfg = {"id": "x", "type": "json_api", "url": "https://x/api"}
+        assert fetcher._fetch_source(cfg)[0]["body"].startswith("正文")
+        fetcher2 = self._patch(monkeypatch, self._payload([self._row()]), body="正文")
+        assert fetcher2._fetch_source({**cfg, "fetch_body": False})[0]["body"] == ""
+
+    def test_max_items_capped(self, monkeypatch):
+        rows = [self._row() for _ in range(30)]
+        for i, r in enumerate(rows):
+            r["title"] = f"国务院办公厅关于印发第{i}批重点事项清单的通知"
+        fetcher = self._patch(monkeypatch, self._payload(rows))
+        items = fetcher._fetch_source({
+            "id": "x", "type": "json_api", "url": "https://x/api", "max_items": 5})
+        assert len(items) == 5
+
+
+class TestGovPolicyLibraryConfig:
+    """sources.yaml 里的政策库源配置必须完整，否则线上静默抓空。"""
+
+    @staticmethod
+    def _sources() -> list[dict]:
+        import yaml
+        from pathlib import Path
+
+        p = Path(__file__).resolve().parents[2] / "family_os" / "config" / "sources.yaml"
+        data = yaml.safe_load(p.read_text(encoding="utf-8"))
+        return data["sources"]
+
+    def test_gov_policy_library_configured(self):
+        by_id = {s["id"]: s for s in self._sources()}
+        for sid, tab in (("gov_cn_gw", "zhengcelibrary_gw"),
+                         ("gov_cn_bm", "zhengcelibrary_bm")):
+            s = by_id.get(sid)
+            assert s, f"缺少政策库源 {sid}"
+            assert s.get("type") == "json_api"
+            assert tab in s["url"], f"{sid} 的 url 未指向 {tab} 分栏"
+            assert s.get("items_path") == "searchVO.listVO"
+            assert "新闻" in s.get("tags", []), f"{sid} 未挂 新闻 tag，不会被抓取"
+            assert s.get("max_age_days", 0) >= 2, f"{sid} 时效窗口过窄"
+
+    def test_gov_policy_library_sends_referer(self):
+        """gov.cn 检索接口对无 Referer 的请求更易被限流。"""
+        for s in self._sources():
+            if s.get("type") == "json_api":
+                assert (s.get("headers") or {}).get("Referer", "").endswith("gov.cn/")
+
+    def test_ndrc_news_column_configured(self):
+        """发改委「新闻发布」栏目（区别于「通知公告」）：发布会/答记者问形态。"""
+        by_id = {s["id"]: s for s in self._sources()}
+        s = by_id.get("ndrc_news")
+        assert s, "缺少 ndrc_news 源"
+        assert s.get("type") == "web_list"
+        assert "/xwdt/xwfb/" in s["list_url"]
+        assert "新闻" in s.get("tags", [])
+        assert s.get("max_age_days", 0) >= 2
+
+    def test_wallstreetcn_feeds_both_pipelines(self):
+        """华尔街见闻同时供 strategy_radar「投资」板块与每日晨报（用户 2026-11-03 要求）。
+
+        噪音靠 scope 的正则硬边界控制，不靠 tag 隔离：实测 50 条里只有 1 条
+        （「中国10月RatingDog制造业PMI为52」）命中四类信号，其余财报/行情标题
+        在 scope 阶段就被丢掉，不增加任何 LLM 调用。
+        """
+        by_id = {s["id"]: s for s in self._sources()}
+        s = by_id.get("wallstreetcn")
+        assert s, "缺少 wallstreetcn 源"
+        assert "投资" in s.get("tags", []), "未挂 投资 tag → radar 不会订阅"
+        assert "新闻" in s.get("tags", []), "未挂 新闻 tag → news_digest 不会抓"
+
+
+class TestNewsAttribution:
+    """2026-11-04 用户要求：gold/股市影响、措辞解读、历史措辞变化都要说明来自第几条。
+
+    推送里「今日要闻」由 `_format_selected` 按 1..N 编号，所以喂给模型的列表必须
+    用**同一顺序同一编号**，否则模型写的【第2条】会对不上读者看到的第 2 条。
+    """
+
+    @staticmethod
+    def _arts():
+        return [
+            {"title": "央行上调外汇存准率", "source_name": "财新", "summary": "由4%上调至6%"},
+            {"title": "国务院报告：国有土地总面积", "source_name": "中新网·时政",
+             "summary": "52360.4万公顷"},
+            {"title": "发改委：关注AI对就业影响", "source_name": "财新", "summary": "强化监测预警"},
+        ]
+
+    def _ctx(self, tmp_path, reply="ok"):
+        import tests.conftest as _c  # noqa: F401  保证 conftest 已加载
+        from family_os.plugins.news_digest import analyzer
+
+        prompts = []
+
+        class Rec:
+            def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
+                prompts.append(prompt)
+                return reply
+
+        ctx = _mk_ctx(tmp_path, Rec())
+        return analyzer, ctx, prompts
+
+    def test_numbered_news_matches_push_order(self):
+        from family_os.plugins.news_digest import analyzer
+
+        block = analyzer._numbered_news(self._arts(), 3, 40)
+        lines = [l for l in block.splitlines() if l.startswith("第")]
+        assert lines[0].startswith("第1条｜财新｜央行上调外汇存准率")
+        assert lines[1].startswith("第2条｜中新网·时政｜国务院报告")
+        assert lines[2].startswith("第3条｜财新｜发改委")
+
+    def test_normalize_refs_unifies_variants(self):
+        from family_os.plugins.news_digest import analyzer
+
+        cases = {
+            "第1条 上调存准率": "【第1条】 上调存准率",
+            "（第2条）土壤": "【第2条】土壤",
+            "[第 3 条] 就业": "【第3条】 就业",
+            "【第1条】已规范": "【第1条】已规范",
+            # 模型把模板省略号抄下来 → 剔除（后面还有正文才剔）
+            "【核心判断】【第1条】……消费基础设施纳入支持": "【核心判断】【第1条】消费基础设施纳入支持",
+        }
+        for raw, want in cases.items():
+            assert analyzer._normalize_refs(raw) == want, raw
+        # 幂等
+        once = analyzer._normalize_refs("（第1条）x")
+        assert analyzer._normalize_refs(once) == once
+        # 行尾省略号可能是真占位，不剔除
+        assert analyzer._normalize_refs("【第1条】……").endswith("……")
+
+    def test_stage1_prompt_requires_refs(self, tmp_path):
+        analyzer, ctx, prompts = self._ctx(tmp_path)
+        analyzer._stage1_decode(
+            ctx, "METHOD", '{"items":[{"key_phrases":["上调"]}]}', self._arts())
+        p = prompts[0]
+        assert "【第N条】" in p, "缺少出处标注要求"
+        assert "第1条｜财新｜央行上调外汇存准率" in p, "要闻列表未带编号"
+
+    def test_stage2_prompt_requires_refs(self, tmp_path):
+        analyzer, ctx, prompts = self._ctx(tmp_path)
+        analyzer._stage2_compare(
+            ctx, "METHOD", '["今日措辞"]',
+            {"zzjj": [{"date": "2026-09-26", "text": "公报A"}]},
+            focus="核心判断", articles=self._arts())
+        p = prompts[0]
+        assert "【第N条】" in p
+        assert "第2条｜中新网·时政" in p, "stage2 看不到编号列表就无法标注出处"
+
+    def test_market_impact_groups_by_item(self, tmp_path):
+        analyzer, ctx, prompts = self._ctx(tmp_path)
+        analyzer._stage_market_impact(ctx, self._arts())
+        p = prompts[0]
+        assert "【第1条】" in p and "最多 3 组" in p
+        assert "传导链条" in p, "用户点名要写传导链条"
+        assert "不相关的条目不要写" in p, "避免把土地面积那条硬凑成利率影响"
+
+    def test_normalize_applied_in_finalize(self, monkeypatch, tmp_path):
+        """整条管线输出应已规范化（插件渲染层直接消费）。"""
+        from family_os.plugins.news_digest import analyzer
+
+        monkeypatch.setattr(analyzer, "_ask_with_fallback",
+                            lambda ctx, prompt: "（第1条）黄金：通常偏强")
+        assert analyzer._normalize_refs("（第1条）黄金：通常偏强") == \
+            "【第1条】黄金：通常偏强"
+
+    def test_stage2_placeholder_hidden_even_with_ref(self):
+        """占位句即使带【第N条】前缀也要隐藏（渲染层剥离标记后判断）。"""
+        from family_os.plugins.news_digest.plugin import NewsDigest
+
+        out = NewsDigest._drop_stage2_placeholders(
+            "【第1条】无对应历史提法，无法直接对比\n【第2条】新提法：「X」")
+        assert "无对应历史提法" not in out
+        assert "【第2条】" in out
+
+
+class TestMandatoryIndicators:
+    """2026-11-05 用户点名：这 8 项指标「如果新闻里有一定要入选并解读」。
+
+    美国非农 / 美国CPI / FOMC 决议 ；中国社融·新增信贷 / CPI / PPI / PMI / LPR。
+    它们不受「宁缺毋滥」裁量，且必须附带对黄金与股市的影响 + 传导链条。
+    """
+
+    def test_labels_for_all_eight(self):
+        from family_os.plugins.news_digest import scope
+
+        cases = {
+            "美国9月非农就业新增25.4万人": "美国非农",
+            "美国9月CPI同比上涨2.8%": "美国CPI",
+            "美联储宣布降息25个基点": "FOMC决议",
+            "中国10月CPI同比上涨0.3%": "中国CPI",
+            "9月份PPI同比下降2.1%": "中国PPI",
+            "10月制造业PMI为49.8%": "中国PMI",
+            "LPR报价连续三个月不变": "LPR报价",
+            "10月社会融资规模增量为1.2万亿元": "中国社融/信贷",
+        }
+        for title, want in cases.items():
+            assert scope.mandatory_label(title) == want, title
+
+    def test_us_and_cn_cpi_are_distinguished(self):
+        from family_os.plugins.news_digest import scope
+
+        assert scope.mandatory_label("美国CPI超预期回落") == "美国CPI"
+        assert scope.mandatory_label("我国CPI同比上涨0.3%") == "中国CPI"
+        # 标题没写国别、摘要写了美国 → 仍按美国口径
+        assert scope.mandatory_label(
+            "9月CPI同比上涨2.8%", "美国劳工部公布的数据显示…") == "美国CPI"
+
+    def test_us_ppi_pmi_not_mandatory(self):
+        """美国 PPI/PMI 不在用户点名的清单里，仍走普通指标裁量。"""
+        from family_os.plugins.news_digest import scope
+
+        assert scope.mandatory_label("美国10月PPI环比上涨0.3%") is None
+        assert scope.mandatory_label("美国10月ISM制造业PMI为48.7") is None
+        # 但仍然是合格的经济指标（可被 LLM 裁量选中）
+        assert scope.classify("美国10月ISM制造业PMI为48.7") == "indicator"
+
+    def test_ordinary_news_not_mandatory(self):
+        from family_os.plugins.news_digest import scope
+
+        for title in ("中共中央政治局会议分析研究当前经济形势",
+                      "国务院办公厅关于发展体育赛事激发消费活力的意见",
+                      "第九届进博会开幕 意向成交额创新高"):
+            assert scope.mandatory_label(title) is None, title
+
+    def test_real_world_false_positives_rejected(self):
+        """2026-11-05 实抓样本：摘要提到指标 ≠ 这条新闻是指标发布。
+
+        用「标题+摘要」匹配时，6 条命中里 5 条是假的——ADP 小非农被当非农、
+        欧元区通胀被当美国 CPI、金价行情稿因摘要提美联储降息被当 FOMC 决议。
+        这些稿子一旦被强制推送，正是用户最反感的噪音。
+        """
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            ("美国10月ADP新增就业8.6万人超预期，连续16个月增加",
+             "市场等待周五非农数据"),
+            ("欧元区通胀创三年新高！能源冲击未退",
+             "欧元区CPI同比上涨3.4%，欧洲央行12月加息"),
+            ("民主党横扫国会，黄金重返4045美元！",
+             "投资者关注美联储后续降息路径"),
+            ("中东缓和+美国中选明朗 国际金价现最强单日反弹",
+             "市场对美联储12月决议预期升温"),
+        ]
+        for title, summary in cases:
+            assert scope.mandatory_label(title, summary) is None, title
+
+    def test_nonfarm_passes_scope(self):
+        """非农原本被 scope 挡在门外（不在 _DATA_RE 里），必须放进来。"""
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify("美国9月非农就业新增25.4万人") == "indicator"
+        assert scope.classify("新增信贷超预期，社融存量增速回升") == "indicator"
+
+    def test_merge_puts_mandatory_first_and_caps(self):
+        from family_os.plugins.news_digest import analyzer
+
+        arts = [
+            {"title": "美国9月非农就业新增25.4万人", "published": "2026-11-05",
+             "summary": "新增25.4万", "source_name": "源"},
+            {"title": "中国10月CPI同比上涨0.3%", "published": "2026-11-05",
+             "summary": "同比0.3%", "source_name": "源"},
+            {"title": "LPR报价连续三个月不变", "published": "2026-11-05",
+             "summary": "1年期3.0%", "source_name": "源"},
+        ]
+        llm_items = [{"title": "LPR报价连续三个月不变", "summary": "s",
+                      "reason": "r", "category": "指标"}]
+        merged = analyzer._merge_mandatory(llm_items, arts)
+        titles = [i["title"] for i in merged]
+        assert "美国9月非农就业新增25.4万人" in titles
+        assert "中国10月CPI同比上涨0.3%" in titles
+        assert titles.count("LPR报价连续三个月不变") == 1, "同一标题不得重复"
+        assert merged[0]["reason"].startswith("必须关注指标")
+
+    def test_market_impact_triggered_by_plain_indicator(self, tmp_path):
+        """PMI/社融这类非利率指标也要触发「黄金与股市影响」。"""
+        from family_os.plugins.news_digest import analyzer
+
+        ctx = _mk_ctx(tmp_path, None)
+        assert analyzer._needs_market_impact(
+            [{"title": "10月制造业PMI为49.8%", "summary": "环比回落"}]) is True
+        assert analyzer._needs_market_impact(
+            [{"title": "10月社会融资规模增量为1.2万亿元", "summary": ""}]) is True
+        assert analyzer._needs_market_impact(
+            [{"title": "某地举办智能家居产业博览会", "summary": ""}]) is False

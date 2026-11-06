@@ -264,7 +264,13 @@ def schedule_daemon():
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda sig, frame: stop.set())
     signal.signal(signal.SIGTERM, lambda sig, frame: stop.set())
-    stop.wait()
+    # ⚠️ 不能写 stop.wait()（无超时）：PEP 475 规定信号处理器不抛异常时被中断的
+    # 系统调用会自动重试，Event.wait() 的 lock.acquire 会一直等下去 —— SIGTERM
+    # 设了标志位却永不返回，systemd 只能等满 TimeoutStopSec 再 SIGKILL
+    # （2026-11-04 实测：每次 restart 卡 90s 并记一条 Failed with result 'timeout'）。
+    # 用「1 秒超时循环」让主线程周期性回到字节码层，信号才能生效。
+    while not stop.is_set():
+        stop.wait(1.0)
     typer.echo("Scheduler daemon stopped.")
 
 

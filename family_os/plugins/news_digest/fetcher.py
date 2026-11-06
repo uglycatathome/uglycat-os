@@ -67,6 +67,9 @@ def _fetch_source(source: dict) -> list[dict]:
     # 机构站（无 RSS）：走列表页解析分支
     if source.get("type") == "web_list":
         return _fetch_web_list(source)
+    # 官方结构化检索接口（无 RSS、栏目页又 JS 渲染）：走 JSON 取数分支
+    if source.get("type") == "json_api":
+        return _fetch_json_api(source)
 
     client = httpx.Client(timeout=15, follow_redirects=True)
     try:
@@ -169,6 +172,119 @@ def _fetch_web_list(source: dict) -> list[dict]:
     items = out[:max_items]
     for it in items:
         it["body"] = _fetch_body(it["url"])
+    return items
+
+
+def _json_published(row: dict, field: str):
+    """解析 json_api 条目的发布时间；支持毫秒时间戳（gov.cn 的 pubtime）。
+
+    返回 tz-aware datetime 或 None（无该字段/格式不认识）。
+    """
+    from datetime import datetime, timezone
+
+    raw = row.get(field)
+    if raw in (None, "", 0, "0"):
+        return None
+    try:
+        ts = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if ts > 1e11:          # 毫秒时间戳
+        ts /= 1000.0
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _json_rows(payload, path: str) -> list[dict]:
+    """按点号路径从响应体里取出条目列表（如 searchVO.listVO）。"""
+    node = payload
+    for key in path.split("."):
+        node = node.get(key) if isinstance(node, dict) else None
+        if node is None:
+            return []
+    return node if isinstance(node, list) else []
+
+
+def _fetch_json_api(source: dict) -> list[dict]:
+    """从官方结构化检索接口取条目（无 RSS、栏目页又 JS 渲染时的第三条通道）。
+
+    2026-11-03 新增。首个接入方是中国政府网「政策文件库」检索接口
+    （t=zhengcelibrary_gw 国务院文件 / zhengcelibrary_bm 部门文件），返回
+    ``{"searchVO": {"listVO": [{title, url, summary, pubtime(ms), pcode, puborg}]}}``。
+
+    为什么需要这条通道：部委官网栏目页实测普遍不可抓（2026-11-03 复测：商务部
+    404、金融监管总局/人社部/工信部 空壳页、住建部 403、全国人大 454B），而这个
+    接口一次覆盖国务院 + 各组成部门的全国性制度文件（部门库 12815 条）。
+
+    **发布机构与文号并入摘要**：实测部门文件的标题/正文开头常只有文号、没有部委
+    简称（如「关于印发《城乡义务教育补助经费管理办法》的通知」实际发文单位是
+    财政部+教育部，只存在于 ``puborg`` 字段），不并入就会被选题范围（scope 依赖
+    标题+摘要判断发布主体）误判为「非国家级发布」而整条丢弃。
+
+    配置字段（除 url 外均可选，默认按 gov.cn 结构）：
+      items_path / title_field / url_field / summary_field /
+      published_ms_field / docno_field / puborg_field /
+      headers / max_age_days / max_items / fetch_body
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+    headers.update(source.get("headers") or {})
+    resp = httpx.get(source["url"], timeout=20, follow_redirects=True,
+                     headers=headers)
+    resp.raise_for_status()
+
+    rows = _json_rows(resp.json(),
+                      str(source.get("items_path") or "searchVO.listVO"))
+    if not rows:
+        logger.warning("json_api 源 %s 未取到条目（接口结构可能变化）",
+                       source.get("id"))
+        return []
+
+    t_f = source.get("title_field", "title")
+    u_f = source.get("url_field", "url")
+    s_f = source.get("summary_field", "summary")
+    p_f = source.get("published_ms_field", "pubtime")
+    d_f = source.get("docno_field", "pcode")
+    o_f = source.get("puborg_field", "puborg")
+
+    cutoff = _now_minus(int(source.get("max_age_days", MAX_AGE_DAYS)))
+    out: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = " ".join(str(row.get(t_f) or "").split())
+        if len(title) < 8:              # 导航/按钮类残条
+            continue
+        published = _json_published(row, p_f)
+        if published and published < cutoff:
+            continue
+
+        summary = " ".join(str(row.get(s_f) or "").split())
+        # 机构 + 文号（如「财政部 教育部｜财教〔2026〕195号」）：既是政策文件分量的
+        # 强标识，也是 scope 判定发布主体的唯一依据（标题里往往没有部委名）。
+        meta = [x for x in (str(row.get(o_f) or "").strip(),
+                            str(row.get(d_f) or "").strip())
+                if x and x not in summary]
+        if meta:
+            summary = "｜".join(meta + [summary]) if summary else "｜".join(meta)
+
+        out.append({
+            "title": title,
+            "url": str(row.get(u_f) or "").strip(),
+            "summary": summary,
+            "body": "",
+            "published": published.isoformat() if published else "",
+            "source_id": source["id"],
+            "source_name": source.get("name", source["id"]),
+        })
+
+    out.sort(key=lambda a: a["published"], reverse=True)
+    items = out[: int(source.get("max_items", 10))]
+    # 政策文件正文较长且是「措辞提取」的材料来源；默认抓正文，可在源上关掉。
+    if source.get("fetch_body", True):
+        for it in items:
+            it["body"] = _fetch_body(it["url"])
     return items
 
 

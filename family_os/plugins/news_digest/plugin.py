@@ -45,6 +45,8 @@ _STAGE2_EMPTY_PREFIXES = ("无对应历史提法", "无对应历史", "无延续
                           "无相关历史变化", "（无相关历史变化")
 # stage2 三个类别标题（占位行被剔除后，无内容的孤儿标题一并隐藏）。
 _STAGE2_HEADERS = ("新提法", "力度变化", "延续")
+# 行首的「【第N条】」出处标记（2026-11-04 起每行必须带）；判占位/裸标题前先剥离。
+_REF_PREFIX_RE = re.compile(r"^(【第[1-9]条】\s*)+")
 
 # 推送消息里的来源缩写（2026-10-27：微信端来源全称太长，只留简短标识）。
 _SOURCE_SHORT = {
@@ -61,6 +63,9 @@ _SOURCE_SHORT = {
     "雪球热门": "雪球",
     "CGTN-Business": "CGTN",
     "CNBC-Asia": "CNBC",
+    # 2026-11-03 新增的政策库源：全名 9~11 字，行内会被截成「中国政府网-部门…」
+    "中国政府网-国务院文件": "国务院文件",
+    "中国政府网-部门文件": "部门文件",
 }
 
 
@@ -212,7 +217,8 @@ class NewsDigest(Skill):
         if result.get("market_impact", "").strip():
             mi = self._strip_icons(self._strip_notes(result["market_impact"]))
             if mi.strip():
-                lines.append("\n### 📈 利率变化对黄金与股市的影响\n" + mi.strip())
+                # 2026-11-05：不再只覆盖利率，非农/CPI/PPI/PMI/社融/LPR 同样在此解读
+                lines.append("\n### 📈 关键指标对黄金与股市的影响\n" + mi.strip())
         if result.get("stage1", "").strip():
             stage1 = self._strip_icons(self._strip_notes(result["stage1"]))
             if stage1.strip():
@@ -270,10 +276,11 @@ class NewsDigest(Skill):
             if not s:
                 continue
             probe = re.sub(r"^[0-9]+[.、)）]\s*", "", s)   # 去掉 "1. " 序号前缀
+            probe = _REF_PREFIX_RE.sub("", probe)          # 去掉「【第N条】」出处标记
             if probe.startswith(_STAGE2_EMPTY_PREFIXES) or "无法直接对比" in probe:
                 continue    # 空占位句 → 剔除
-            if s in _STAGE2_HEADERS or s in (f"{h}：" for h in _STAGE2_HEADERS) \
-                    or s in (f"{h}:" for h in _STAGE2_HEADERS):
+            if probe in _STAGE2_HEADERS or probe in (f"{h}：" for h in _STAGE2_HEADERS) \
+                    or probe in (f"{h}:" for h in _STAGE2_HEADERS):
                 entries.append(("header", s))   # 裸类别标题（无内联内容）
             else:
                 entries.append(("item", s))
@@ -359,9 +366,17 @@ class NewsDigest(Skill):
         """
         items = []
         for i, it in enumerate(selected, 1):
-            title = (it.get("title") or "").strip()
-            if not title:
+            raw_title = (it.get("title") or "").strip()
+            if not raw_title:
                 continue
+            # 2026-11-06：长标题不再硬截断到 40 字（会截在「…全国人民代表大会常…」
+            # 这种地方，读不出重点）。优先用模型给的 title_short（≤18 字），
+            # 缺失时走确定性压缩；40 字只作最后安全线。
+            title = (it.get("title_short") or "").strip()
+            if not title:
+                title = analyzer.short_title(raw_title)
+            if len(title) > 40:
+                title = analyzer.short_title(raw_title, limit=40)
             src = NewsDigest._short_source(it.get("source_name") or "")
             cat = (it.get("category") or "").strip()
             url = (it.get("url") or "").strip()
@@ -371,7 +386,6 @@ class NewsDigest(Skill):
                 summary = summary[:120] + "…"
             if len(reason) > 60:
                 reason = reason[:60] + "…"
-            title = title if len(title) <= 40 else title[:40] + "…"
 
             head = f"**[{title}]({url})**" if url else f"**{title}**"
             block = f"{i}. {head}"

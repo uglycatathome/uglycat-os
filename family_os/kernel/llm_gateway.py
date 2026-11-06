@@ -23,6 +23,7 @@ _ZHIPU_LOCK = threading.Lock()
 _ZHIPU_MAX_ATTEMPTS = 2          # 只重试一次，避免限流时长时间占用
 _ZHIPU_BACKOFF_S = (2,)
 _ZHIPU_TIMEOUT_S = 90            # 免费档排队可能很久；超时即降级
+_LLM_TIMEOUT_S = 120             # 其它 provider 的统一请求超时
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -114,6 +115,12 @@ class LLMGateway:
         completion_kwargs: dict = {
             "model": model,
             "messages": [{"role": "user", "content": full_prompt}],
+            # 所有 provider 都必须有请求超时。litellm 对非智谱 provider 默认不设
+            # 超时/设得很长，一旦对端建立连接但不回数据，调用会无限挂住——而 LLM
+            # 调用发生在「构建消息」阶段，挂住就等于当天消息发不出去。
+            # 2026-11-05 定：统一 120s（家庭建议 200 字，正常 3~15s）。
+            "timeout": _LLM_TIMEOUT_S,
+            "num_retries": 0,
         }
         if api_key:
             completion_kwargs["api_key"] = api_key

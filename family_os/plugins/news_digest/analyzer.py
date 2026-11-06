@@ -173,13 +173,15 @@ def _finalize(ctx: Context, run_dir, articles: list[dict], selected: list[dict],
     market_impact = ""
     if mode != "empty":
         stage0 = _stage0_extract(ctx, decode.stage0_block(), matched)
-        stage1 = _stage1_decode(ctx, decode.stage1_block(), stage0, matched)
-        stage2 = _stage2_compare(ctx, decode.stage2_block(), stage0, meeting_archive,
-                                 focus=stage1)
+        stage1 = _normalize_refs(
+            _stage1_decode(ctx, decode.stage1_block(), stage0, matched))
+        stage2 = _normalize_refs(
+            _stage2_compare(ctx, decode.stage2_block(), stage0, meeting_archive,
+                            focus=stage1, articles=matched))
         stage3 = _stage3_advice(ctx, stage1, stage2, matched)
-        # 利率类新闻（中国/美国降息加息、降准、LPR、美联储）额外补黄金/股市影响
-        if matched and _is_monetary_news(matched):
-            market_impact = _stage_market_impact(ctx, matched)
+        # 利率类新闻或必须关注指标 → 补「对黄金与股市的影响 + 传导链条」
+        if matched and _needs_market_impact(matched):
+            market_impact = _normalize_refs(_stage_market_impact(ctx, matched))
     # 会议概要与措辞归档（命中登记表即入库，本地化存储供后续对比）
     _auto_store_meetings(ctx, run_dir.name, articles, matched, stage1)
 
@@ -351,6 +353,8 @@ def _stage_dedup_parse(raw: str) -> set[int] | None:
 # 「今日无合格新闻」的理由；最终是否入选仍由 scope 硬门槛把关。
 SELECT_WINDOW = 20
 SCOPE_QUOTA = 30
+# 必须关注指标可突破常规 3 条上限（同日 CPI+PPI、社融+CPI 等叠加发布时）
+MANDATORY_HARD_CAP = 5
 
 
 def _pick_select_candidates(articles: list[dict],
@@ -368,6 +372,61 @@ def _pick_select_candidates(articles: list[dict],
     if in_scope:
         return in_scope[:quota]
     return ordered[:limit]
+
+
+def _mandatory_items(articles: list[dict]) -> list[dict]:
+    """从候选里挑出「必须关注指标」条目（时间倒序，同名指标只留一条）。
+
+    2026-11-05：美国非农/CPI/FOMC、中国社融·信贷/CPI/PPI/PMI、LPR 这 8 项
+    是黄金与股市的直接输入，命中即必须入选——不交给 LLM 裁量。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    ordered = sorted(articles or [], key=lambda x: x.get("published") or "",
+                     reverse=True)
+    for a in ordered:
+        title = a.get("title") or ""
+        # 硬边界优先于「必选」：强制入选不能绕过 scope。2026-11-06 实测——
+        # 台湾 CPI 就是从这里进来的（mandatory_label 曾把它判成「中国CPI」，
+        # 而 scope.classify 因台港澳属地区口径返回 None，两边口径不一致）。
+        if scope.classify(title, a.get("summary") or "") is None:
+            continue
+        label = scope.mandatory_label(title,
+                                      a.get("summary") or a.get("body") or "")
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        out.append({
+            "title": title,
+            "title_short": short_title(title),
+            "category": "指标",
+            "summary": " ".join(
+                (a.get("summary") or a.get("body") or "").split())[:200],
+            "reason": f"必须关注指标：{label}",
+            "topic_key": label,
+        })
+    return out
+
+
+def _merge_mandatory(items: list[dict], articles: list[dict]) -> list[dict]:
+    """把必须关注指标并入精选结果：强制项在前，LLM 其余结果随后，按标题去重。
+
+    上限放宽到 ``MANDATORY_HARD_CAP``——同日多项指标集中发布时（如 CPI 与 PPI
+    同时出、或社融叠加 CPI），常规 3 条装不下，而这些都是用户点名必看的。
+    """
+    mandatory = _mandatory_items(articles)
+    if mandatory:
+        titles = {str(i.get("title") or "").strip() for i in mandatory}
+        rest = [i for i in (items or [])
+                if str(i.get("title") or "").strip() not in titles]
+        merged = (mandatory + rest)[:MANDATORY_HARD_CAP]
+    else:
+        merged = list(items or [])
+    # 短标题兜底：模型偶发不给 title_short，或条目来自强制入选项，统一补一次
+    for it in merged:
+        if not (it.get("title_short") or "").strip():
+            it["title_short"] = short_title(it.get("title") or "")
+    return merged
 
 
 def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
@@ -418,6 +477,11 @@ def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
         "  · 物价与增长：CPI、PPI、GDP、PMI、工业增加值、社会消费品零售、固定资产投资；\n"
         "  · 金融与就业：社融、M2、新增人民币贷款、70 城房价、失业率、外汇储备；\n"
         "  · 只认全国口径、由官方机构发布的原始数据。\n"
+        "  · **必选清单（命中就必须入选，不得以「只是数据」为由跳过）**："
+        "美国非农、美国 CPI、FOMC 议息决议、中国社融/新增信贷、中国 CPI、"
+        "中国 PPI、中国 PMI、LPR 报价。这几项不受下面「最多 3 条」的限制。\n"
+        "  · 这类条目的 summary 必须写清两件事：①数据实际值相对预期/前值的方向"
+        "（超预期还是低于预期）；②它对利率预期或盈利预期意味着什么。只复述数字不合格。\n"
         "【D·产业大会（展示型，不是政策信号）】\n"
         "  · 进博会、广交会、服贸会、高交会、消博会、世界人工智能大会、"
         "世界互联网大会、博鳌亚洲论坛、中国发展高层论坛、夏季达沃斯等"
@@ -446,13 +510,16 @@ def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
         "最重要的 3 条。一条都不够格时 items 为空数组，并用 note 一句话说明理由。\n"
         "每条给出：\n"
         "  title（与原文标题一致）\n"
+        "  title_short（**≤18 字**，把长标题压成一句能看懂的短标题：去掉"
+        "「关于…的报告——2026年…在…会议上」这类副标题、日期与会议场合，"
+        "保留主体 + 核心动作，例如「国务院金融工作情况报告」；不要用省略号截断）\n"
         "  category（四选一：文件 / 会议 / 指标 / 产业大会）\n"
         "  summary（2~3 句说人话，说明它对创业、职业或投资意味着什么）\n"
         "  reason（一句话：为什么它能改变创业/职业/投资的判断）\n"
         "  topic_key（3~8 字主题标签，如「降准」「美联储降息」「民营经济」，用于跨天去重）\n"
-        "输出 JSON：{\"items\":[{\"title\":\"...\",\"category\":\"文件\","
-        "\"summary\":\"...\",\"reason\":\"...\",\"topic_key\":\"...\"}],"
-        "\"note\":\"...\"}。只输出 JSON，不要输出其他文字。\n"
+        "输出 JSON：{\"items\":[{\"title\":\"...\",\"title_short\":\"...\","
+        "\"category\":\"文件\",\"summary\":\"...\",\"reason\":\"...\","
+        "\"topic_key\":\"...\"}],\"note\":\"...\"}。只输出 JSON，不要输出其他文字。\n"
         f"## 当日新闻\n{limited}"
         + _extra_rules("select")
     )
@@ -479,7 +546,12 @@ def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
         # 硬上限：无论模型输出多少，最多保留 3 条（默认 1 条由提示词约束）
         if items is not None and len(items) > 3:
             items = items[:3]
-        return items, note
+        # 必须关注指标（非农/CPI/FOMC/社融/PPI/PMI/LPR）：命中即强制入选，
+        # 不受上面的 3 条上限与「宁缺毋滥」裁量约束（2026-11-05 用户要求）。
+        merged = _merge_mandatory(items or [], articles)
+        if items is None and not merged:
+            return None, note      # 解析失败且无必选指标 → 仍按失败处理
+        return merged, note
     except Exception as e:  # noqa: PERF203
         logger.warning("news_digest 精选 LLM 调用失败: %s", str(e)[:120])
         return None, ""
@@ -640,19 +712,82 @@ def _stage0_parse(raw: str) -> list | None:
     return phrases or None
 
 
+def short_title(title: str, limit: int = 24) -> str:
+    """把过长标题压成一句读得懂的短标题（无 LLM 时的确定性兜底）。
+
+    2026-11-06 用户反馈：推送里出现
+    「国务院关于金融工作情况的报告——2026年11月3日在十四届全国人民代表大会常…」
+    ——硬截断到 40 字，重点读不出来。规则：
+      ① 先砍副标题：以「——」「|」「：」分隔时取主标题；
+      ② 再砍附带的日期/会议场合（「2026年11月3日在…会议上」）；
+      ③ 仍超长则在最近的「，、；」处断，最后才硬截。
+    模型若能直接给出 title_short（提示词已要求 ≤18 字），优先用模型的版本。
+    """
+    t = " ".join((title or "").split())
+    if not t or len(t) <= limit:
+        return t
+    for sep in ("——", "|", "：", ":"):
+        head = t.split(sep)[0].strip()
+        if head and len(head) >= 8:
+            t = head
+            break
+    # 去掉「在2026年11月3日…会议上」这类场合尾巴
+    t = re.sub(r"[，,]?\s*(?:于|在)?\s*20\d{2}\s*年.*$", "", t).strip() or t
+    if len(t) <= limit:
+        return t
+    cut = max(t.rfind(ch, 0, limit) for ch in "，、；,; ")
+    if cut >= 8:
+        return t[:cut] + ("…" if cut < len(t) else "")
+    return t[:limit] + "…"
+
+
+def _numbered_news(articles, limit: int = 3, chars: int = 120) -> str:
+    """把精选条目渲染成「第N条」列表——编号必须与推送里「今日要闻」的序号一致。
+
+    推送侧由 ``plugin._format_selected`` 按 ``enumerate(selected, 1)`` 编号，所以这里
+    必须用同一顺序、从 1 开始，否则模型写的「【第2条】」会对不上读者看到的第 2 条。
+    """
+    lines: list[str] = []
+    for i, a in enumerate((articles or [])[:limit], 1):
+        head = f"第{i}条｜{a.get('source_name', '')}｜{a.get('title', '')}"
+        body = " ".join((a.get("summary") or "").split())[:chars]
+        lines.append(head)
+        if body:
+            lines.append(f"    {body}")
+    return "\n".join(lines) or "（无）"
+
+
+_REF_WRAPPED_RE = re.compile(r"[【\[（(]\s*第\s*([1-9])\s*条\s*[】\]）)]")
+_REF_PLAIN_RE = re.compile(r"第\s*([1-9])\s*条")
+# 模型偶发把格式样例里的省略号原样留下：「【核心判断】【第1条】……消费基础设施…」
+# 只在省略号后面还有正文时剔除（行尾的省略号可能是真正的空占位，保留）。
+_REF_ELLIPSIS_RE = re.compile(r"(【第[1-9]条】)\s*[…]+\s*(?=[^\s…])")
+
+
+def _normalize_refs(text: str) -> str:
+    """把「第N条」统一成 ``【第N条】``，并清掉紧跟其后的模板省略号（幂等）。
+
+    模型会写成「第1条」「（第1条）」「[第 1 条]」，渲染层无法统一识别；先剥掉各种
+    包裹符号，再统一加【】。重复执行结果不变。
+    """
+    if not text:
+        return text
+    stripped = _REF_WRAPPED_RE.sub(r"第\1条", text)
+    unified = _REF_PLAIN_RE.sub(r"【第\1条】", stripped)
+    return _REF_ELLIPSIS_RE.sub(r"\1", unified)
+
+
 def _stage1_decode(ctx, block, stage0, articles=None) -> str:
     """核心判断 + ≤3 条支撑措辞（口径：对创业/职业/投资的含义）。
 
     2026-10-09：stage0 为空占位时直接返回空串、不调 LLM。
     2026-10-25：加入今日要闻，避免只凭拆散的措辞推主线；按「政策动作类型」归类。
     2026-11-01：解读落点从「对普通人意味着什么」改为「对创业/职业/投资意味着什么」。
+    2026-11-04：每条结论必须标【第N条】出处（用户要求：能看出解读的是哪条新闻）。
     """
     if not _has_official_wording(stage0):
         return ""
-    news = "\n".join(
-        f"- {a.get('title', '')}：{(a.get('summary') or '')[:120]}"
-        for a in (articles or [])[:3]
-    ) or "（无）"
+    news = _numbered_news(articles, 3, 120)
     prompt = (
         f"{block}\n\n"
         "任务：不要逐条翻译所有措辞。先判断这条新闻属于哪类信号："
@@ -667,26 +802,30 @@ def _stage1_decode(ctx, block, stage0, articles=None) -> str:
         "与主线无关、只是修辞的措辞一律不提。\n"
         "若今日有多条要闻，**以第 1 条为主线**；其余条目的措辞只有在直接支撑该主线时"
         "才保留（不同主题不要硬凑进同一条核心判断）。\n"
+        "**每条结论都必须标明依据第几条新闻**：用【第N条】，N 必须与下方列表编号一致；"
+        "跨多条就并列写【第1条】【第3条】。说不出出处的句子不要写。\n"
         "格式（纯文本，不要把模板文字原样抄出来）：\n"
-        "【核心判断】……\n"
-        "1. 原措辞A → 对创业/职业/投资的含义\n"
-        "2. 原措辞B → 对创业/职业/投资的含义\n"
-        "3. 原措辞C → 对创业/职业/投资的含义\n"
+        "【核心判断】【第1条】……\n"
+        "1. 【第1条】原措辞A → 对创业/职业/投资的含义\n"
+        "2. 【第2条】原措辞B → 对创业/职业/投资的含义\n"
+        "3. 【第1条】【第3条】原措辞C → 对创业/职业/投资的含义\n"
         "写法示例（体现力度/范围/时间，不要照抄）："
         "『全面推开 → 全国都执行，别只盯试点城市的生意』；"
         "『限期整改 → 相关行业合规成本上升，进场前先算这笔账』\n"
         "若这些措辞并非真实政策表述、无解读价值，则不要输出任何内容（宁可留空）。\n\n"
-        f"## 今日要闻\n{news}\n\n## 特征措辞\n{stage0}"
+        f"## 今日要闻（编号即推送里的「第N条」）\n{news}\n\n## 特征措辞\n{stage0}"
         + _extra_rules("stage1")
     )
     return _ask_with_fallback(ctx, prompt)
 
 
-def _stage2_compare(ctx, block, stage0, meeting_archive, focus: str = "") -> str:
+def _stage2_compare(ctx, block, stage0, meeting_archive, focus: str = "",
+                    articles=None) -> str:
     """今日特征措辞 vs 备份历史公报：强调同主题措辞变化。无历史则注明跳过。
 
     2026-10-01：今日无官方措辞（stage0 为空占位）时直接返回空串、不调 LLM，
     避免模型把任务说明回显进正文（「没有就没有」）；渲染层据此整段省略。
+    2026-11-04：每条变化必须标【第N条】出处；为此需要今日要闻的编号列表。
     """
     if not _has_official_wording(stage0):
         return ""
@@ -705,12 +844,19 @@ def _stage2_compare(ctx, block, stage0, meeting_archive, focus: str = "") -> str
         return "（对比库为空，跳过措辞横向对比。）"
     corpus = "\n\n".join(parts)
     focus_block = f"\n## 今日核心判断（对比必须围绕它展开）\n{focus.strip()}\n" if focus.strip() else ""
+    news_block = f"\n## 今日要闻（编号即推送里的「第N条」）\n{_numbered_news(articles, 3, 120)}\n" \
+        if articles else ""
     prompt = (
         f"{block}\n\n"
         "任务：只对比与【今日核心判断】直接相关的同主题措辞变化，最多 2 条，宁缺毋滥。"
-        "每条一句话（≤50 字）：说清今天的说法相对历史公报是【新提法】【力度变化】还是"
-        "【延续】。与核心判断无关的措辞不要写；没有相关变化就只输出「（无相关历史变化）」。\n\n"
-        f"{focus_block}\n## 今日特征措辞\n{stage0}\n\n## 历史公报文本\n{corpus}"
+        "每条一句话（≤50 字），**开头必须标【第N条】指明对应今天哪条新闻**"
+        "（N 与下方列表编号一致），再说清今天的说法相对历史公报是【新提法】"
+        "【力度变化】还是【延续】。\n"
+        "格式：\n"
+        "【第1条】【新提法】「原措辞」→ 变化在哪、意味着什么\n"
+        "【第3条】【延续】「原措辞」→ 与历史一致的什么地方\n"
+        "与核心判断无关的措辞不要写；没有相关变化就只输出「（无相关历史变化）」。\n\n"
+        f"{focus_block}{news_block}\n## 今日特征措辞\n{stage0}\n\n## 历史公报文本\n{corpus}"
         + _extra_rules("stage2")
     )
     return _ask_with_fallback(ctx, prompt)
@@ -731,31 +877,59 @@ def _is_monetary_news(articles: list[dict]) -> bool:
     return any(k in text for k in _MONETARY_KEYWORDS)
 
 
+def _needs_market_impact(articles: list[dict]) -> bool:
+    """需要「对黄金与股市的影响 + 传导链条」的条件（2026-11-05 扩展）。
+
+    ① 利率类新闻（原有）；② 命中「必须关注指标」——非农/CPI/FOMC/社融·信贷/
+    PPI/PMI/LPR 都会通过利率预期、盈利预期或风险偏好传导到黄金与股市，
+    不能只推数字不解释。
+    """
+    if _is_monetary_news(articles):
+        return True
+    return any(scope.mandatory_label(a.get("title") or "",
+                                     a.get("summary") or "")
+               for a in (articles or []))
+
+
 def _stage_market_impact(ctx, articles) -> str:
-    """利率类新闻专用：说明对黄金与股市的通常影响 + 1 条普通家庭建议。
+    """对黄金与股市的影响 + 传导链条（利率类与必须关注指标共用）。
 
     只讲方向与机制，不预测点位/涨跌幅；单一事件不改长期配置。
+    2026-11-04：按新闻条目分组输出、每组标【第N条】——旧版只说「降息通常利多…」
+    这类通用话术，读者看不出它对应哪条新闻（用户反馈）。
+    2026-11-05：覆盖非农/CPI/PPI/PMI/社融/LPR 等指标，并**必须写出传导链条**
+    （数据 → 政策/利率 → 资产），这是用户点名的重点。
     """
-    news = "\n".join(
-        f"- {a.get('title', '')}：{(a.get('summary') or '')[:160]}"
-        for a in articles[:3]
-    )
+    news = _numbered_news(articles, 5, 160)
     prompt = (
-        "任务：今天的要闻涉及利率（中国或美国的降息/加息/降准/LPR/美联储议息）。"
-        "请用普通人能懂的话，说明它对【黄金】和【股市】的通常影响，并给 1 条可执行建议。\n"
+        "任务：今天的要闻里有【经济指标】或【利率决策】（美国非农/CPI/FOMC、"
+        "中国社融·信贷/CPI/PPI/PMI/LPR，或降息降准加息）。请逐条说明它对"
+        "【黄金】和【股市】的影响，并把**传导链条写清楚**。\n"
         "规则：\n"
-        "① 先分清方向：降息/降准通常利多黄金与风险资产（流动性宽松、持有黄金机会成本下降）；"
-        "加息/收紧通常相反。美国利率还要看美元（美元走强→黄金承压）。\n"
-        "② 只讲方向与机制，必须用「通常/历史规律」措辞；不得预测具体涨跌幅、点位或时间。\n"
-        "③ 黄金、股市各一行（≤45 字）：方向 + 一句机制 + 需要观察的变量。\n"
-        "④ 建议一行（≤50 字）：面向正在做投资/创业决策的人，动作具体（分批定投/"
-        "不加杠杆/先观望），提醒单一事件不改长期配置。\n"
-        "⑤ 事实只能来自下方新闻，不编造数据；禁止「必涨/抄底」这类断言。\n"
+        "① **每条必须给一条传导链条**，写成**一行**、用「→」连接三段：\n"
+        "   【数据/政策的实际变化】→【中间变量：利率、汇率、盈利预期、风险偏好】"
+        "→【对黄金与股市的方向，一句话说完】。\n"
+        "   链条 ≤60 字；第三段要合起来说（如「→ 利空黄金、压制高估值成长股」），"
+        "**不要在链条里分成「黄金：」「股市：」两行**，也不要用「影响市场情绪」这类空话。\n"
+        "② 判断方向时用这些常识锚点，但要结合本条数据的实际方向（超预期还是低于预期）："
+        "利率下行/宽松 → 黄金与成长股偏多；利率上行/收紧 → 相反；"
+        "美元走强 → 黄金承压；盈利预期上修 → 股市偏多、黄金无直接影响；"
+        "社融/信贷放量 → 宽信用利好顺周期与地产链；PMI 回升 → 顺周期盈利改善；"
+        "PMI 走弱 → A 股顺周期与大盘承压，**对黄金影响有限**（国内数据不直接定价金价，"
+        "除非引发人民币大幅贬值）；"
+        "CPI 回升而 PPI 低迷 → 中下游毛利受压；非农强 → 降息预期降温 → "
+        "美债实际利率上行 → 黄金承压、高估值成长股受压。\n"
+        "③ **只针对确实属于上述指标/利率的条目写**（最多 3 组）：每组开头标"
+        "【第N条】（N 与下方列表编号一致）；不相关的条目不要写，绝不硬凑。\n"
+        "④ 黄金、股市各一行（各 ≤40 字）：方向 + 一句机制。\n"
+        "⑤ 只讲方向与机制，必须用「通常/历史规律」，不得预测点位或涨跌幅；"
+        "事实只能来自下方新闻，不编造数据；禁止「必涨/抄底」这类断言。\n"
         "输出格式（纯文本）：\n"
+        "【第1条】\n"
+        "链条：…… → …… → ……\n"
         "黄金：……\n"
-        "股市：……\n"
-        "建议：……\n\n"
-        f"## 今日要闻\n{news}"
+        "股市：……\n\n"
+        f"## 今日要闻（编号即推送里的「第N条」）\n{news}"
         + _extra_rules("market_impact")
     )
     return _ask_with_fallback(ctx, prompt)

@@ -15,6 +15,13 @@ sources:
   tags:
   - 投资
   default_sensitivity: public
+- id: wallstreetcn
+  name: 华尔街见闻
+  url: https://dedicated.wallstreetcn.com/rss.xml
+  tags:
+  - 投资
+  - 新闻
+  default_sensitivity: public
 - id: tmtpost
   name: 钛媒体
   url: https://www.tmtpost.com/rss
@@ -175,6 +182,16 @@ sources:
   tags:
   - 新闻
   default_sensitivity: public
+- id: ndrc_news
+  name: 国家发展改革委-新闻发布
+  type: web_list
+  list_url: https://www.ndrc.gov.cn/xwdt/xwfb/
+  link_pattern: t(20\d{2})(\d{2})(\d{2})_
+  max_age_days: 3
+  max_items: 5
+  tags:
+  - 新闻
+  default_sensitivity: public
 - id: mof_policy
   name: 财政部
   type: web_list
@@ -195,6 +212,30 @@ sources:
 - id: fed_press
   name: 美联储
   url: https://www.federalreserve.gov/feeds/press_all.xml
+  max_age_days: 3
+  max_items: 10
+  tags:
+  - 新闻
+  default_sensitivity: public
+- id: gov_cn_gw
+  name: 中国政府网-国务院文件
+  type: json_api
+  url: https://sousuo.www.gov.cn/search-gov/data?q=&timetype=timeqb&sort=pubtime&sortType=1&searchfield=title&p=1&n=30&t=zhengcelibrary_gw
+  items_path: searchVO.listVO
+  headers:
+    Referer: https://www.gov.cn/
+  max_age_days: 3
+  max_items: 8
+  tags:
+  - 新闻
+  default_sensitivity: public
+- id: gov_cn_bm
+  name: 中国政府网-部门文件
+  type: json_api
+  url: https://sousuo.www.gov.cn/search-gov/data?q=&timetype=timeqb&sort=pubtime&sortType=1&searchfield=title&p=1&n=30&t=zhengcelibrary_bm
+  items_path: searchVO.listVO
+  headers:
+    Referer: https://www.gov.cn/
   max_age_days: 3
   max_items: 10
   tags:

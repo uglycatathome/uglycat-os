@@ -20,7 +20,8 @@ uglycat-os/
 
 - 代码在**仓库根目录**（不是 `app/`，与上游私有版本的布局不同）；`./uglycat` 启动器会自动 cd 到根目录。
 - 运行时数据在 `data/`（gitignored）：`family.db`、`history/news_digest/<日期>/`、`inbox/*.md`。
-- 新闻选题范围由 `family_os/plugins/news_digest/scope.py` 决定（四类信号：重要文件 / 重要会议 / 重要经济指标 / 产业大会），提示词只能在范围内调口径。
+- 新闻选题范围由 `family_os/plugins/news_digest/scope.py` 决定（四类信号：重要文件 / 重要会议 / 重要经济指标 / 产业大会），提示词只能在范围内调口径；排除清单也在该文件：地区口径指标、传闻与小道消息、官员个人表态、法规打包清理、自然资源家底盘点、单条数量新闻等，命中即不选。
+- 8 项必看指标、黄金与股市影响、按第几条标注出处在 `analyzer.py`；强制入选候选必须先过 `scope.classify()`，不能绕过范围边界。长标题由 `short_title()` 压缩。
 
 ## 支持环境
 

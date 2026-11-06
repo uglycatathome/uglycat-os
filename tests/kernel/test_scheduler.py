@@ -242,3 +242,53 @@ class TestRunAndNotify:
         scheduler._run_and_notify("scheduled_skill", mock_ctx)
 
         mock_notifier.return_value.send.assert_called_once()
+
+
+# ── Tests: 作业级硬截止 ───────────────────────────────────────────────────────
+
+class HangingSkill(Skill):
+    """一个永不返回的插件——模拟网络调用死等（2026-11-04/05 两次真实事故）。"""
+
+    name: str = "hanging_skill"
+    cost_tier: str = "free"
+
+    def run(self, ctx: Context) -> Result:  # noqa: ARG002
+        import time
+        time.sleep(30)
+        return Result(status="ok")
+
+    def register_cli(self, app) -> None:
+        pass
+
+
+class TestJobHardTimeout:
+    """卡死的插件不能把 daemon 线程占死，当天消息必须照发（哪怕是 ❌ 超时）。"""
+
+    @pytest.fixture
+    def notifier_config(self, mocker):
+        cfg = mocker.MagicMock()
+        cfg.scheduler.timezone = "UTC"
+        cfg.notifier.channels = []
+        return cfg
+
+    def test_hung_plugin_is_abandoned_and_error_notified(
+            self, notifier_config, mock_ctx, mocker, monkeypatch):
+        from family_os.kernel import scheduler as sched_mod
+
+        monkeypatch.setattr(sched_mod, "_JOB_HARD_TIMEOUT_S", 0.5)
+        mock_notifier = mocker.patch(
+            "family_os.kernel.scheduler.Notifier", autospec=True)
+        mock_ctx.config = notifier_config
+        scheduler = Scheduler(config=notifier_config, plugins=[HangingSkill])
+
+        import time
+        t0 = time.monotonic()
+        scheduler._run_and_notify("hanging_skill", mock_ctx)
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 3, f"硬截止没有生效（耗时 {elapsed:.1f}s）"
+        instance = mock_notifier.return_value
+        instance.send.assert_called_once()
+        result_arg = instance.send.call_args[0][0]
+        assert result_arg.status == "error"
+        assert "秒未完成" in (result_arg.error or "")
