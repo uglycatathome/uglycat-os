@@ -151,11 +151,15 @@ def run(
         False, "--notify-invest",
         help="Send WeChat to invest group only",
     ),
+    stage: str = typer.Option(
+        None, "--stage",
+        help="子阶段：fetch=只抓取不发，publish=按已存记录发布（仅 market_pulse）",
+    ),
 ):
     """Run a plugin by name. Use --notify-* for end-to-end WeChat sending."""
     ctx = _get_context()
     scheduler = _get_scheduler()
-    result = scheduler.run_plugin(plugin_name, ctx)
+    result = scheduler.run_plugin(plugin_name, ctx, stage=stage)
     typer.echo(f"Result: {result.model_dump_json(indent=2)}")
 
     if notify or notify_family or notify_invest:
@@ -246,6 +250,12 @@ def schedule_list():
             f"schedule={job['schedule']}  "
             f"cost_tier={job['cost_tier']}"
         )
+        # 第二触发时间（目前只有 market_pulse 的夜间抓取用它）
+        if job.get("fetch_schedule"):
+            typer.echo(
+                f"{'':20s} fetch={job['fetch_schedule']}  "
+                f"（stage=fetch，只抓取不发消息）"
+            )
 
 
 @schedule_app.command("daemon")

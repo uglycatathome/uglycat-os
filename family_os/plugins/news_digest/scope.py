@@ -44,6 +44,8 @@
     不是 FOMC 决议；只认宣布/决议/议息/纪要（2026-11-06 用户点名）。
   · **行政法规「打包清理」**（修改和废止部分行政法规的决定）：立改废释的程序性
     动作，不带产业/价格信号，对经济没有直接影响（2026-11-06 用户点名）。
+  · **外国主体的国内事务**（泰国 PM2.5 防控、他国环保/民生/社会政策）：不是中国
+    信号，也不是跟踪的中美宏观指标，一律不算（2026-11-07 用户点名）。
 
 分工：本模块只做【够不够格】的确定性判断（纯正则、零 LLM 成本），不判断
 【重要不重要】——排序、摘要、「为什么重要」仍由 LLM 精选阶段负责。
@@ -167,6 +169,45 @@ _RUMOR_RE = re.compile(
     r"未经证实|小道消息"
 )
 
+# ── 指标缩写边界 + 颗粒物写法归一（2026-11-07 生产事故）──────────────────
+# 事故：中新网「泰国部署2027年PM2.5防控措施」被推送成「必须关注指标：中国社融/信贷」。
+# 根因：标题里的 "PM2.5" 含子串 "M2"，裸正则 `M2` 把它当成货币供应量 M2，
+# 于是 scope.classify 判「经济指标」、mandatory_label 判「中国社融/信贷」，绕过
+# LLM 裁量强制入选；连「全国 PM2.5 浓度下降六成」这类环保稿也会混进选题。
+# 两层防御：
+#   ① 所有 ASCII 缩写加边界（前后不得为字母/数字）→ PM2.5 的 M2 前是 P，不命中；
+#   ② 匹配前把颗粒物写法整体替换为中文占位词，防以后新增缩写重蹈覆辙。
+_PARTICULATE_RE = re.compile(r"PM\s*2[.．]?\s*5|PM\s*10|细颗粒物", re.I)
+
+
+def _normalize(text: str) -> str:
+    """指标匹配前统一清洗：压空白 + 抹掉 PM2.5 / PM10 等颗粒物写法。"""
+    return _PARTICULATE_RE.sub("颗粒物", " ".join((text or "").split()))
+
+
+def _acro(*words: str) -> str:
+    """生成带 ASCII 边界的缩写正则片段（M2 不会命中 PM2.5）。"""
+    return (r"(?<![A-Za-z0-9])(?:"
+            + "|".join(re.escape(w) for w in words)
+            + r")(?![A-Za-z0-9])")
+
+
+# ── 境外主体（2026-11-07 用户点名）──────────────────────────────────────
+# 「泰国部署2027年PM2.5防控措施」既不是中国信号，也和经济无关。缩写边界修好后
+# 它已进不来，但同类风险仍在：外国国内新闻只要蹭到任何一个指标/文件词就可能混进
+# 四类信号。故补一道硬边界——外国主体的国内事务一律不算；标题里有中国国家级
+# 发布主体（「国务院关于中泰…的意见」）时才豁免。
+# 美国不在表内：非农 / 美国CPI / FOMC 是用户点名的必看清单，仍按指标正常入选。
+_FOREIGN_ENTITY_RE = re.compile(
+    r"泰国|曼谷|越南|新加坡|马来西亚|印尼|印度尼西亚|菲律宾|缅甸|老挝|柬埔寨|"
+    r"日本|韩国|朝鲜|印度|巴基斯坦|尼泊尔|孟加拉|斯里兰卡|哈萨克斯坦|蒙古国|"
+    r"俄罗斯|乌克兰|白俄罗斯|波兰|英国|法国|德国|意大利|西班牙|荷兰|瑞士|"
+    r"瑞典|比利时|奥地利|希腊|葡萄牙|挪威|芬兰|丹麦|爱尔兰|欧盟|欧元区|欧洲|"
+    r"加拿大|澳大利亚|新西兰|巴西|阿根廷|墨西哥|智利|秘鲁|哥伦比亚|"
+    r"南非|埃及|尼日利亚|肯尼亚|沙特|阿联酋|伊朗|以色列|土耳其|卡塔尔|"
+    r"联合国|世卫组织|世界卫生组织|国际货币基金组织|世界银行|经合组织"
+)
+
 # ── 美联储官员个人表态 ≠ 利率决议（2026-11-06 用户点名）──────────────────
 # 实测漏子：华尔街见闻「美联储鹰声再起！Hammack称利率需升至限制性水平，倾向于
 # 更频繁、小幅加息」被当成「经济指标」入选——它只是官员观点，不是 FOMC 决议。
@@ -231,7 +272,7 @@ _ACTIVITY_RE = re.compile(r"调研|考察|走访|座谈")
 
 # 央行技术性流动性操作（非利率决策）——对创业/职业/投资无直接含义
 _MONETARY_OP_RE = re.compile(
-    r"互换便利|逆回购|中期借贷便利|MLF|SLF|再贷款|再贴现|常备借贷|国库现金|"
+    r"互换便利|逆回购|中期借贷便利|" + _acro("MLF", "SLF") + r"|再贷款|再贴现|常备借贷|国库现金|"
     r"公开市场操作|央票|正回购|流动性投放|流动性支持|流动性工具|流动性安排"
 )
 
@@ -239,8 +280,9 @@ _MONETARY_OP_RE = re.compile(
 # 2026-11-04 补「存准率 / 准备金率」：官方与媒体标题常用缩写（「央行上调外汇存准率」），
 #   只认全称会把真正的货币政策操作漏掉（实测当日第 1 条被误杀）。
 _RATE_RE = re.compile(
-    r"降息|加息|降准|存款准备金率|准备金率|存准率|LPR|贷款市场报价利率|"
-    r"美联储|联邦公开市场委员会|FOMC|议息|联邦基金利率|利率决议|"
+    r"降息|加息|降准|存款准备金率|准备金率|存准率|"
+    + _acro("LPR", "FOMC") + r"|贷款市场报价利率|"
+    r"美联储|联邦公开市场委员会|议息|联邦基金利率|利率决议|"
     r"利率下调|利率上调"
 )
 
@@ -254,12 +296,26 @@ _RESOURCE_STOCK_RE = re.compile(
     r"国土变更调查|矿产资源储量|储量.*万吨"
 )
 
+# ── 单条「数量新闻」（模块文档「明确不算」已约定，2026-11-01 用户点名）──────
+# 出口额 / 进出口金额 / 贸易额这类只有数量、没有决策增量的稿子一律不算选题。
+# 此前只靠 classify 末尾兜底返回 None：标题里一旦蹭到 CPI/PMI/社融 就会被
+# _DATA_RE 判成 indicator、被 mandatory_label 强制入选，等于给数量新闻开了后门。
+# 只认具体数量词，**不能用裸「出口」**——「出口退税」「出口政策」「出口企业」
+# 这类正式文件与政策稿必须照常判定。判定放在指标分支之前，政策文件/会议/
+# 产业大会已在更早的步骤返回，不受影响。
+_QUANTITY_NEWS_RE = re.compile(
+    r"出口额|出口金额|出口总值|进口额|进口金额|进口总值|"
+    r"进出口额|进出口总额|进出口金额|进出口总值|"
+    r"贸易额|贸易总额|贸易总值"
+)
+
 # 全国口径的重要经济数据（地方/行业自报数据不算）
 # 2026-11-05：补「非农/新增信贷」——美国非农是黄金与全球风险资产的第一手驱动，
 #   而 scope 原本只认中国口径数据，会把非农整条过滤掉。
 _DATA_RE = re.compile(
-    r"CPI|PPI|GDP|PMI|居民消费价格|工业生产者出厂价格|采购经理|"
-    r"社会融资规模|社融|M2|广义货币|新增人民币贷款|新增贷款|新增信贷|"
+    _acro("CPI", "PPI", "GDP", "PMI", "M2", "LPR") + r"|"
+    r"居民消费价格|工业生产者出厂价格|采购经理|"
+    r"社会融资规模|社融|广义货币|新增人民币贷款|新增贷款|新增信贷|"
     r"失业率|城镇调查失业率|房价|工业增加值|社会消费品零售|"
     r"固定资产投资|外汇储备|财政收入|非农|非农业就业"
 )
@@ -319,12 +375,22 @@ def label(category: str | None) -> str:
 # 只登记用户点名的 8 项。美国 PPI/PMI、欧元区 CPI 等仍按普通经济指标走 LLM 裁量，
 # 不强制入选（避免把每日推送撑爆）。
 _MANDATORY_US_RE = re.compile(r"美国|美联储|美元|劳工部|联邦")
-# 其他经济体：同名指标（CPI/PMI）出现在这些语境里不算「中国口径」，不强制入选
-_OTHER_REGION_RE = re.compile(
-    r"欧元区|欧洲|欧盟|日本|英国|德国|法国|韩国|印度|加拿大|澳大利亚|新兴市场")
+# 其他经济体：同名指标（CPI/PMI）出现在这些语境里不算「中国口径」，不强制入选。
+# 2026-11-07 统一到完整境外主体表（外加「新兴市场」），与 classify 的闸门同源。
+_OTHER_REGION_RE = re.compile(_FOREIGN_ENTITY_RE.pattern + r"|新兴市场")
 # 台港澳是中国的地区，统计口径与全国不同——2026-11-06 用户点名：
 # 「台湾CPI连续六个月突破通胀警戒线」被标成「中国CPI」并强制入选，这是硬伤。
 _CN_REGION_RE = re.compile(r"台湾|台北|台当局|台湾地区|香港|澳门")
+
+# 带边界的指标词：缩写前后不得是 ASCII 字母/数字，中文近义词不受限。
+# 2026-11-07：此前 `M2` 裸匹配把「PM2.5」当成货币供应量，是本次事故的直接原因。
+_CPI_TOKEN_RE = re.compile(_acro("CPI") + r"|消费物价|消费者价格|消费价格")
+_PPI_TOKEN_RE = re.compile(_acro("PPI") + r"|工业生产者出厂价格|生产者价格")
+_PMI_TOKEN_RE = re.compile(_acro("PMI") + r"|采购经理")
+_LPR_TOKEN_RE = re.compile(_acro("LPR") + r"|贷款市场报价利率")
+_FOMC_TOKEN_RE = re.compile(_acro("FOMC") + r"|联邦公开市场委员会")
+_CN_CREDIT_TOKEN_RE = re.compile(
+    _acro("M2") + r"|社融|社会融资规模|新增人民币贷款|新增贷款|新增信贷|广义货币")
 
 
 def mandatory_label(title: str, summary: str = "") -> str | None:
@@ -336,35 +402,51 @@ def mandatory_label(title: str, summary: str = "") -> str | None:
     宁可漏一条「摘要里才提到数据」的稿子，也不能把行情评论塞进必读。
     国别判定可以看摘要（已确定是 CPI/PPI/PMI 后再定中美，安全）。
 
+    2026-11-07 补：境外主体国内事务直接返回 None。强制入选是绕过 LLM 裁量的
+    最高权限，绝不能给外国环保/民生稿贴「中国社融/信贷」这类标签——那还会把
+    topic_key 写进跨天去重库，让真正的数据稿被当重复标题拦掉。
+
+    2026-11-07 补：单条数量新闻（出口额/进出口金额/贸易额…）在最开头直接返回
+    None。强制入选是绕过 LLM 裁量的最高权限，绝不能让「出口额…+CPI」这类稿子
+    蹭到指标词就贴上「中国CPI」标签。
+
     判定顺序即优先级：非农 > FOMC > CPI > PPI > PMI > LPR > 社融。
     """
-    t = " ".join((title or "").split())
+    t = _normalize(title)
     if not t:
+        return None
+    # 数量新闻与 classify 同源闸门：只有数量、没有指标含义，不得强制入选
+    if _QUANTITY_NEWS_RE.search(t):
         return None
     # 台港澳口径不是「全国口径」，绝不能标成「中国CPI/PPI」强制入选（2026-11-06）
     if _CN_REGION_RE.search(t):
         return None
+    # 境外主体的国内事务：不是中国口径，也不是跟踪的美国宏观指标（2026-11-07）。
+    # 不做机构名豁免——「央行」这类通用词会让「印度央行…」漏过；强制入选误报
+    # 代价高，宁可漏也不要错贴中国指标标签。
+    if _FOREIGN_ENTITY_RE.search(t):
+        return None
     # 传闻与官员个人表态不是正式发布的数据/决议（2026-11-06 用户点名）
     if _RUMOR_RE.search(t) or _is_fed_official_voice(t):
         return None
-    a = f"{t} {' '.join((summary or '').split())}"
+    a = f"{t} {_normalize(summary)}"
     us = bool(_MANDATORY_US_RE.search(a))
     other = bool(_OTHER_REGION_RE.search(t)) and not us and "中国" not in t
 
     if re.search(r"非农", t):
         return "美国非农"
-    if re.search(r"FOMC|联邦公开市场委员会", t) or re.search(
+    if _FOMC_TOKEN_RE.search(t) or re.search(
             r"美联储.{0,12}(决议|议息|降息|加息|维持利率|按兵不动|利率不变)", t):
         return "FOMC决议"
-    if re.search(r"CPI|消费物价|消费者价格|消费价格", t):
+    if _CPI_TOKEN_RE.search(t):
         return None if other else ("美国CPI" if us else "中国CPI")
-    if re.search(r"PPI|工业生产者出厂价格|生产者价格", t):
+    if _PPI_TOKEN_RE.search(t):
         return None if (other or us) else "中国PPI"
-    if re.search(r"PMI|采购经理", t):
+    if _PMI_TOKEN_RE.search(t):
         return None if (other or us) else "中国PMI"
-    if re.search(r"LPR|贷款市场报价利率", t):
+    if _LPR_TOKEN_RE.search(t):
         return None if other else "LPR报价"
-    if re.search(r"社融|社会融资规模|新增人民币贷款|新增贷款|新增信贷|M2|广义货币", t):
+    if _CN_CREDIT_TOKEN_RE.search(t):
         return None if other else "中国社融/信贷"
     return None
 
@@ -403,14 +485,18 @@ def classify(title: str, summary: str = "") -> str | None:
       ⑥ 走访调研座谈类活动 → 排除；
       ⑦ 央行技术性操作（无利率决策）→ 排除；
       ⑧ 制度文件（文种 + 国家级主体）→ policy_doc【必须先于⑨「活动」排除】；
+      ⑧' 境外主体的国内事务 → 排除（2026-11-07；放在⑧之后，让中央级涉外文件放行）；
       ⑨ 行业活动（论坛/展会/赛事/发布会…）→ 排除；
+      ⑨' 单条数量新闻（出口额/进出口金额/贸易额…）→ 排除，必须在⑩之前，
+        否则「出口额…+CPI」会被 _DATA_RE 当成指标强制入选；
       ⑩ 利率决策 / 全国经济数据 → indicator；
-      ⑪ 其余一律不算（含「出口额/进出口金额」这类数量新闻）。
+      ⑪ 其余一律不算。
     """
-    title = " ".join((title or "").split())
+    # 归一化会把 PM2.5 / PM10 抹成「颗粒物」，避免指标缩写误命中（2026-11-07）。
+    title = _normalize(title)
     if not title:
         return None
-    text = f"{title} {' '.join((summary or '').split())}"
+    text = f"{title} {_normalize(summary)}"
 
     if _PARTY_WORK_RE.search(title):
         return None
@@ -452,7 +538,20 @@ def classify(title: str, summary: str = "") -> str | None:
     if _policy_doc(title, text) and not _EVENT_PREVIEW_RE.search(title):
         return POLICY_DOC
 
+    # ⑧' 境外主体的国内事务（2026-11-07 用户点名）：不是中国信号，也不属于跟踪
+    # 的中美宏观指标。放在⑧之后是刻意的——「国务院关于中泰合作的意见」这类中央
+    # 级涉外文件已在⑧放行；走到这里只剩指标类候选，外国主体一律不算。
+    # 不用「中国机构名」做豁免：_NATIONAL_BODY_RE 含「央行/统计局」等通用词，
+    # 「印度央行宣布降息」会借它漏过闸门。美国不在表内，非农/CPI/FOMC 不受影响。
+    if _FOREIGN_ENTITY_RE.search(title):
+        return None
+
     if _EVENT_RE.search(text):
+        return None
+    # ⑨' 数量新闻必须挡在指标判定之前：只有数量、没有决策增量，即使标题同时
+    # 出现 CPI/PMI/社融 也不按 indicator 入选（2026-11-01 用户点名，见模块文档）。
+    # 放在这里而非更早，是为了让 policy_doc / meeting / industry_event 照常放行。
+    if _QUANTITY_NEWS_RE.search(title):
         return None
     if _RATE_RE.search(title):
         return INDICATOR

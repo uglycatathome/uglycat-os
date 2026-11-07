@@ -114,7 +114,16 @@ class PluginInstanceConfig(BaseModel):
 
     enabled: bool = True
     schedule: str | None = None
+    # 可选：同一插件的第二个触发时间。当前只有 market_pulse 用——``schedule``
+    # 负责「早上发布消息」，``fetch_schedule`` 负责「夜间抓取」，触发时以
+    # stage="fetch" 调 run()，插件自行决定不发消息（2026-11-06）。
+    fetch_schedule: str | None = None
     notify_on: list[str] = []
+    # 可选：该插件的单作业硬截止（秒）。不配则用 scheduler 默认 900s。
+    # 每周六的 strategy_radar 实测 30~90 分钟（配置注释有记录），沿用 900s
+    # 会在周报生成前就被判超时、把结果丢掉并推一条「❌ 任务超时」（2026-11-07 事故）。
+    # 长跑插件必须在这里单独放宽，其它插件仍保持 900s 防卡死。
+    hard_timeout_s: float | None = None
 
 
 # ── Environment-variable-backed secrets model ──────────────────────────────

@@ -2966,3 +2966,224 @@ class TestMandatoryIndicators:
             [{"title": "10月社会融资规模增量为1.2万亿元", "summary": ""}]) is True
         assert analyzer._needs_market_impact(
             [{"title": "某地举办智能家居产业博览会", "summary": ""}]) is False
+
+
+class TestForeignAndParticulateGuard:
+    """2026-11-07 生产事故：泰国 PM2.5 被推送成「必须关注指标：中国社融/信贷」。
+
+    根因有两层，任一层单独修好都能挡住这一条，但不能只挡这一条：
+      ① ``PM2.5`` 含子串 ``M2``，裸正则把它当货币供应量 M2 → ``classify`` 判
+        indicator、``mandatory_label`` 判「中国社融/信贷」，绕过 LLM 裁量强制入选；
+        同一 bug 让任何环保类 PM2.5 新闻都能混进选题。
+      ② 没有「境外主体国内事务」硬边界，外国环保/民生稿只要蹭到任意指标词就可能入选。
+    修法：ASCII 缩写加边界 + 颗粒物写法归一 + 境外主体闸门（两处判定同源）。
+    """
+
+    THAI = "泰国部署2027年PM2.5防控措施"
+    THAI_SUMMARY = (
+        "中新社曼谷11月6日电 (王茜 李映民)泰国公共卫生部6日召开2027年雾霾及"
+        "细颗粒物(PM2.5)防控会议，要求加强全国40个高风险府的监测和管理，"
+        "并部署五项医疗卫生应对措施，重点保护约1600万人的脆弱群体。"
+    )
+
+    def test_real_incident_rejected_by_both_gates(self):
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify(self.THAI, self.THAI_SUMMARY) is None
+        assert scope.mandatory_label(self.THAI, self.THAI_SUMMARY) is None
+
+    def test_pm25_is_never_m2(self):
+        """PM2.5/PM10 是颗粒物，不是货币供应量 M2——环保稿一律不进指标。"""
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "泰国部署2027年PM2.5防控措施",
+            "全国地级及以上城市细颗粒物（PM2.5）平均浓度较2013年下降近六成",
+            "北京10月PM2.5浓度同比下降12%",
+            "生态环境部：重点区域PM2.5平均浓度持续改善",
+            "曼谷遭遇PM2.5污染 学校停课",
+            "秋冬季PM10与PM2.5浓度双降",
+            "空气质量优良天数比例与PM2.5浓度变化",
+        ]
+        for t in cases:
+            assert scope.classify(t) is None, t
+            assert scope.mandatory_label(t) is None, t
+
+    def test_real_m2_still_qualifies(self):
+        """加了边界不能把真的 M2/社融数据一起误杀。"""
+        from family_os.plugins.news_digest import scope
+
+        for t in ("中国10月M2同比增长8.2%",
+                  "央行：9月末M2余额同比增长6.8%",
+                  "10月社融规模增量1.4万亿元 M2增速回升"):
+            assert scope.classify(t) == "indicator", t
+            assert scope.mandatory_label(t) == "中国社融/信贷", t
+
+    def test_foreign_domestic_news_excluded_even_with_metric_words(self):
+        """境外主体国内事务：标题蹭到 GDP/CPI/失业率也不算中国信号。"""
+        from family_os.plugins.news_digest import scope
+
+        cases = [
+            "泰国公共卫生部召开2027年雾霾防控会议",
+            "越南公布2026年GDP增长目标",
+            "德国10月CPI同比上涨2.1%",
+            "巴西10月失业率降至6.2%",
+            "欧盟2月PMI回升至50.1",
+            "日本内阁通过2027年度预算案",
+            "韩国发布2027年经济政策方向",
+            "新加坡金管局发布资产管理新办法",
+            "印度央行宣布下调基准利率",
+        ]
+        for t in cases:
+            assert scope.classify(t) is None, t
+            assert scope.mandatory_label(t) is None, t
+
+    def test_china_and_us_signals_unaffected(self):
+        """闸门不能误杀中央级涉外文件、产业大会与用户点名的美国必看清单。"""
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify("国务院关于中泰铁路合作的意见") == "policy_doc"
+        assert scope.classify("第九届进博会开幕 意向成交额创新高") == "industry_event"
+        assert scope.classify("2026世界人工智能大会在上海开幕") == "industry_event"
+        assert scope.classify("中共中央政治局召开会议 分析研究当前经济形势") == "meeting"
+        for t, want in (
+            ("美国10月非农就业新增16.5万 失业率4.1%", "美国非农"),
+            ("美国9月CPI同比上涨2.4%", "美国CPI"),
+            ("美联储宣布降息25个基点", "FOMC决议"),
+            ("中国10月CPI同比上涨0.3%", "中国CPI"),
+        ):
+            assert scope.classify(t) == "indicator", t
+            assert scope.mandatory_label(t) == want, t
+
+    def test_mandatory_items_skip_foreign_news(self):
+        """_mandatory_items 是绕过 LLM 的强制通道，必须同样挡住这条。"""
+        from family_os.plugins.news_digest import analyzer
+
+        arts = [
+            {"title": self.THAI, "summary": self.THAI_SUMMARY,
+             "published": "2026-11-06T14:37:20+00:00", "source_name": "中新网-国际"},
+            {"title": "美国10月非农就业新增16.5万 失业率4.1%",
+             "summary": "美国劳工部6日发布数据", "published": "2026-11-07T00:00:00",
+             "source_name": "中新网"},
+        ]
+        items = analyzer._mandatory_items(arts)
+        titles = [i["title"] for i in items]
+        assert self.THAI not in titles
+        assert "美国10月非农就业新增16.5万 失业率4.1%" in titles
+        assert all("社融" not in i.get("topic_key", "") for i in items), \
+            "不能把外国稿的 topic_key 写成中国社融，否则会污染跨天去重"
+
+    def test_select_candidates_exclude_foreign_news(self):
+        """境外软新闻不该占用 LLM 精选的候选窗口。"""
+        from family_os.plugins.news_digest import analyzer
+
+        arts = [
+            {"title": self.THAI, "summary": self.THAI_SUMMARY,
+             "published": "2026-11-06T14:37:20+00:00", "source_name": "中新网-国际"},
+            {"title": "国务院印发《关于促进民营经济发展壮大的意见》", "summary": "",
+             "published": "2026-11-05T00:00:00", "source_name": "新华社"},
+        ]
+        picked = analyzer._pick_select_candidates(arts)
+        assert self.THAI not in [a["title"] for a in picked]
+
+    def test_llm_output_still_gated(self, tmp_path):
+        """即使模型硬把泰国 PM2.5 选进来，精选后的 scope 硬门槛也要剔除。"""
+        from family_os.plugins.news_digest import analyzer
+
+        prompts = []
+
+        class Rec:
+            def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
+                prompts.append(prompt)
+                return json.dumps({
+                    "items": [{"title": TestForeignAndParticulateGuard.THAI,
+                               "title_short": "泰国PM2.5防控", "category": "指标",
+                               "summary": "五项医疗卫生应对措施",
+                               "reason": "利好环保产业", "topic_key": "环保"}],
+                    "note": "",
+                })
+
+        article = {"title": self.THAI, "summary": self.THAI_SUMMARY,
+                   "published": "2026-11-06T14:37:20+00:00",
+                   "source_name": "中新网-国际"}
+        items, _ = analyzer._stage_select(_mk_ctx(tmp_path, Rec()), [article])
+        assert all(i["title"] != self.THAI for i in (items or []))
+        assert "外国主体的国内事务" in prompts[0], "精选提示词应明确排除境外事务"
+
+
+class TestArticleBodyScope:
+    """2026-11-07：中新网文章页的「阅读推荐 / 首页热榜」不得混进 body。
+
+    旧实现拼接整页所有 <p>；中新网把几十条推荐位标题也写成 <p>，长度都 ≥10，
+    min_chars 过滤挡不住。11-07 美国非农那条的 body 尾部因此混进 C罗、敦煌、
+    「资本市场政策加力稳预期」等标题，污染措辞提取与 LLM 解读。
+    修法：正文容器优先 + 链接型标题过滤 + 短正文不再退回整页文本。
+    """
+
+    ARTICLE = (
+        '<div id="left_zw">'
+        '<p>中新社华盛顿11月6日电 美国劳工部6日发布数据显示，美国10月非农就业'
+        '岗位增加16.5万个，失业率为4.1%。</p>'
+        '<p>数据显示，美国10月的就业增长主要来自专业和商业服务、医疗保健以及'
+        '交通运输和仓储业，薪资同比上涨3.1%。</p>'
+        '<p>截至记者发稿时，市场预计美联储12月加息的概率为76.8%，较一天前'
+        '上升近10个百分点。(完)</p>'
+        '</div>'
+    )
+    # 真实页面的两种推荐位结构：<a><div><p>…</p></div></a> 与 <li><div><a><p>…</p>
+    # 标题里故意混入「！」「？」——不能靠「有没有标点」判标题。
+    RECOMMEND = (
+        '<div id="ydtj">'
+        '<a href="/a"><div class="ydtj_div_right">'
+        '<p>23年传奇谢幕！C罗官宣退出国家队，但千球纪录还在等他</p></div></a>'
+        '<a href="/b"><div class="ydtj_div_right">'
+        '<p>资本市场政策加力稳预期</p></div></a>'
+        '<a href="/c"><div class="ydtj_div_right">'
+        '<p>人这一辈子，一定要在冬天来一次敦煌！</p></div></a>'
+        '<ul><li><div class="sp_tp"><a href="/d">'
+        '<p>量贩零食店越开越多 是真低价还是定价魔术？</p></a></div></li>'
+        '<li><a href="/e"><p>画里赏金秋 诗中庆丰年</p></a></li></ul>'
+        '</div>'
+    )
+    NOISE = ("C罗", "资本市场政策", "敦煌", "量贩零食", "画里赏金秋")
+
+    def test_chinanews_layout_keeps_only_article_paragraphs(self):
+        from family_os.plugins.news_digest import fetcher
+
+        out = fetcher._extract_body(
+            f"<html><body>{self.ARTICLE}{self.RECOMMEND}</body></html>")
+        assert "美国劳工部" in out and "(完)" in out
+        for bad in self.NOISE:
+            assert bad not in out, f"推荐位标题混入正文：{bad}"
+        assert len(out.splitlines()) == 3, out
+
+    def test_link_heading_filter_works_without_article_container(self):
+        """没命中正文容器的站点，仍靠链接型标题过滤挡住热榜。"""
+        from family_os.plugins.news_digest import fetcher
+
+        body = self.ARTICLE.replace('id="left_zw"', 'class="other_cms"')
+        out = fetcher._extract_body(
+            f"<html><body>{body}{self.RECOMMEND}</body></html>")
+        assert "美国劳工部" in out
+        for bad in self.NOISE:
+            assert bad not in out, f"推荐位标题混入正文：{bad}"
+
+    def test_short_article_no_longer_falls_back_to_whole_page(self):
+        """短正文不得触发「整页文本」兜底——那会把侧栏热榜重新带回来。"""
+        from family_os.plugins.news_digest import fetcher
+
+        html = ("<html><body>"
+                "<p>国务院常务会议部署稳增长工作，要求加力扩大内需。</p>"
+                + self.RECOMMEND + "</body></html>")
+        out = fetcher._extract_body(html)
+        assert "国务院常务会议" in out
+        for bad in self.NOISE:
+            assert bad not in out, f"短稿退回整页文本：{bad}"
+
+    def test_div_only_body_still_uses_fallback(self):
+        """正文完全不在 <p> 里时（纯 <div> 稿件）仍保留整页文本兜底。"""
+        from family_os.plugins.news_digest import fetcher
+
+        html = ("<html><body><div>中新社北京10月12日电 国务院常务会议"
+                "部署稳增长工作，加力扩大内需。</div></body></html>")
+        assert "国务院常务会议" in fetcher._extract_body(html)

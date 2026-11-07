@@ -301,6 +301,62 @@ def _fetch_body(url: str) -> str:
         return ""
 
 
+# ── 正文容器（2026-11-07 生产事故）──────────────────────────────────────
+# 事故：中新网文章页把「阅读推荐 / 首页热榜」也写成 <p>，旧实现直接拼接**整页**
+# 所有 <p>，于是 11-07 美国非农那条的 body 尾部混进几十条无关标题（C罗、敦煌、
+# 「资本市场政策加力稳预期」…），污染了措辞提取与 LLM 解读（stage2 出现与两条
+# 新闻都无关的「长期向好的基本面没有变」）。
+# 正文在语义容器里（中新网是 div#left_zw），命中后只取容器内 <p>；选择器按
+# 精确→通用排列，避免 `#content` 这类过宽选择器把侧栏一起圈进来。
+_ARTICLE_SELECTORS = (
+    "#left_zw", ".left_zw",                          # 中新网 / 中新社
+    "#artibody", "#articleContent", "#article_content", "#zoom",
+    "[itemprop=\"articleBody\"]",
+    ".article-content", ".article_content", ".article-body", ".article_body",
+    ".detail-content", ".news-content", ".TRS_Editor",
+    ".content_maincontent_content", "article",
+)
+
+def _is_link_heading(p, text: str) -> bool:
+    """推荐位/热榜标题：整段挂在 <a> 祖先里、且短。
+
+    中新网这类页面的相关推荐是 `<a><div><p>标题</p></div></a>`，标题本身就是
+    一个链接，长度 10~40 字；正文段落不会整体包在 <a> 里。
+    **不用「有没有句末标点」判标题**：真实热榜里有「散瞳验光会伤孩子眼睛？」
+    「…来一次敦煌！」这类带标点结尾的标题，靠标点反而会漏。
+    """
+    if len(text) > 60:
+        return False
+    node = p.parent
+    for _ in range(4):
+        if node is None:
+            return False
+        if node.tag == "a":
+            return True
+        node = node.parent
+    return False
+
+
+def _paragraph_texts(node, min_chars: int = 10) -> list[str]:
+    """取节点内合格 <p> 文本：压空白、丢过短片段、丢推荐位标题。"""
+    out = []
+    for p in node.css("p"):
+        t = " ".join((p.text(deep=True, strip=True) or "").split())
+        if len(t) >= min_chars and not _is_link_heading(p, t):
+            out.append(t)
+    return out
+
+
+def _scoped_paragraphs(tree) -> list[str] | None:
+    """优先返回正文容器内的 <p>；都未命中返回 None（由调用方退回全页）。"""
+    for sel in _ARTICLE_SELECTORS:
+        for node in tree.css(sel):
+            texts = _paragraph_texts(node)
+            if len(texts) >= 2 and sum(len(t) for t in texts) >= 120:
+                return texts
+    return None
+
+
 def _extract_body(html: str, max_chars: int = 3000) -> str:
     """用 selectolax 提取正文纯文本（优先 <p> 段落，剔除 style/script/nav 噪音）。
 
@@ -310,6 +366,10 @@ def _extract_body(html: str, max_chars: int = 3000) -> str:
     **优先拼接 <p> 段落**——纯 body 文本会先取到站点导航菜单/版权行等链接型
     chrome，而正文段落几乎都在 <p> 里；<p> 太少再退回整个 body 文本。数据缺失
     或疑似 CSS/JS 垃圾则返回空串（降级用 summary），避免把噪音喂给 LLM 造成误判。
+
+    2026-11-07：再加两层——① 命中正文容器时只取容器内 <p>，不再看侧栏热榜；
+    ② 无论哪条路径都剔除「挂在 <a> 里、短、无句末标点」的推荐位标题。定位到
+    容器后**不启用**整页 body 兜底，否则又会把侧栏带回来。
     """
     try:
         from selectolax.parser import HTMLParser
@@ -319,12 +379,21 @@ def _extract_body(html: str, max_chars: int = 3000) -> str:
                     "aside"):
             for node in tree.css(sel):
                 node.decompose()
-        text = _paragraph_text(tree)
-        if len(text) < 120 and tree.body:
-            body = "\n".join(l.strip() for l in tree.body.text(strip=False).splitlines()
-                             if l.strip())
-            if len(body) > len(text):
-                text = body
+        scoped = _scoped_paragraphs(tree)
+        if scoped is not None:
+            text = "\n".join(scoped)
+        else:
+            texts = _paragraph_texts(tree)
+            if texts:
+                # 哪怕只有一段短正文也不再退回整页文本：那个 fallback 会把侧栏
+                # 热榜重新带回来（2026-11-07）。宁可短，也不要喂给 LLM 噪音。
+                text = "\n".join(texts)
+            elif tree.body:
+                # 站点正文完全不在 <p> 里（如纯 <div> 稿件）才用整页文本。
+                text = "\n".join(l.strip() for l in tree.body.text(strip=False).splitlines()
+                                 if l.strip())
+            else:
+                text = ""
         return "" if _is_junk_body(text) else text[:max_chars]
     except Exception:
         import re
@@ -336,13 +405,8 @@ def _extract_body(html: str, max_chars: int = 3000) -> str:
 
 
 def _paragraph_text(tree, min_chars: int = 10) -> str:
-    """拼接 <p> 段落文本（合并空白），过滤过短片段（导航/按钮等）。"""
-    out = []
-    for p in tree.css("p"):
-        t = " ".join((p.text(deep=True, strip=True) or "").split())
-        if len(t) >= min_chars:
-            out.append(t)
-    return "\n".join(out)
+    """拼接 <p> 段落文本（合并空白），过滤过短片段与推荐位标题。"""
+    return "\n".join(_paragraph_texts(tree, min_chars))
 
 
 def _strip_style_script(html: str) -> str:
