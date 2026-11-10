@@ -6,12 +6,15 @@ and logs all usage for cost tracking.
 """
 
 import hashlib
+import logging
 import re
 import threading
 import time
 
 from family_os.kernel.config import Config
 from family_os.kernel.store import Store
+
+logger = logging.getLogger(__name__)
 
 # ── 智谱（BigModel）免费档适配 ───────────────────────────────────────────────
 # 1) 免费档并发数为 1：用进程级锁串行化，避免并发请求直接失败。
@@ -98,17 +101,37 @@ class LLMGateway:
         if cached is not None:
             return cached
 
-        # 5. Resolve model
-        model = self._resolve_model(model_tier)
+        # 5. Resolve 候选模型链
+        #    default / reasoning 档位带降级链（旧 provider 按顺序兜底）；
+        #    显式模型 id 只有一个候选，降级由调用方自己的模型链负责。
+        candidates = self._candidate_models(model_tier)
 
-        # 6. Import litellm (lazy — avoids requiring it for tests that
-        #    raise before reaching this point)
-        import litellm  # noqa: F811
+        # 6/7. 逐个候选调用，成功即返回；全部失败抛最后一个异常
+        last_err: Exception | None = None
+        for idx, model in enumerate(candidates):
+            try:
+                return self._ask_model(model, full_prompt, cache_key,
+                                       plugin_name=plugin_name)
+            except Exception as exc:  # noqa: BLE001 — 逐个降级
+                last_err = exc
+                if idx < len(candidates) - 1:
+                    logger.warning(
+                        "LLM model %s failed: %s → 降级到 %s",
+                        model, str(exc)[:120], candidates[idx + 1],
+                    )
+        assert last_err is not None
+        raise last_err
 
-        # 7. Resolve API key and call LLM
+    # ── 单模型调用 ──────────────────────────────────────────────────────────
+
+    def _ask_model(self, model: str, full_prompt: str, cache_key: str,
+                   plugin_name: str = "unknown") -> str:
+        """用指定 *model* 完成一次请求（含成本记账与结果缓存）。"""
+        import litellm
+
         api_key = self._get_api_key(model)
-        # 判断 provider：当前网关把 deepseek → 内置 deepseek 分支，
-        # 其余 providers（如 siliconflow）→ 走自定义 base_url + openai 兼容。
+        # 判断 provider：modelscope/zhipu/siliconflow → 自定义 base_url + openai 兼容；
+        # deepseek → litellm 内置 deepseek 分支。
         provider = self._provider_for_model(model)
         is_deepseek = provider == "deepseek"
 
@@ -127,8 +150,18 @@ class LLMGateway:
         if is_deepseek:
             completion_kwargs["api_base"] = "https://api.deepseek.com"
             # Enable reasoning for deepseek-v4-pro (reasoning tier)
-            if model_tier == "reasoning":
+            if model == self._config.llm.reasoning_model:
                 completion_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        elif provider == "modelscope":
+            # ModelScope 魔搭推理 API：OpenAI 兼容端点（2026-11-10 起的默认 provider）。
+            # 模型 id 含 "deepseek" 但**不是** DeepSeek 原生网关，必须显式走 openai 兼容。
+            cfg = self._config.llm.providers.get("modelscope", {})
+            completion_kwargs["custom_llm_provider"] = "openai"
+            completion_kwargs["api_base"] = cfg.get("base_url")
+            completion_kwargs["api_key"] = (api_key
+                                            or self._config.secrets.modelscope_api_key)
+            # 不开也不关 thinking：DeepSeek-V4.1-Flash 的 reasoning 走
+            # `reasoning_content` 字段、content 正常返回，实测两者可共存。
         elif provider == "siliconflow":
             # 硅基流动走 litellm 的 openai 兼容 provider
             cfg = self._config.llm.providers.get("siliconflow", {})
@@ -269,6 +302,15 @@ class LLMGateway:
         """调用 litellm；智谱免费档额外处理并发 1、空内容与限流重试。"""
         import litellm
 
+        if provider == "modelscope":
+            # 空 content 必须当失败抛出：DeepSeek-V4.1-Flash 是思考型模型，
+            # 若 max_tokens 被 reasoning 吃光，HTTP 200 但 content 为空。
+            # 静默返回空串会让插件以为「模型没想说的」而错失降级到旧 provider。
+            resp = litellm.completion(**completion_kwargs)
+            if not (resp.choices[0].message.content or "").strip():
+                raise RuntimeError("ModelScope 返回空内容（reasoning 可能耗尽 max_tokens）")
+            return resp
+
         if provider != "zhipu":
             return litellm.completion(**completion_kwargs)
 
@@ -312,25 +354,64 @@ class LLMGateway:
             return self._config.llm.reasoning_model
         return model_tier
 
+    def _candidate_models(self, model_tier: str) -> list[str]:
+        """返回该档位的候选模型链（首元素为要用的模型，其余为降级）。
+
+        * ``default`` / ``reasoning``：主模型 + 各自的 fallback 链
+          （2026-11-10 起主模型是 ModelScope 的 DeepSeek-V4.1-Flash，
+           旧的智谱 / 硅基 / DeepSeek 原生 key 按配置顺序兜底）
+        * 其它（显式模型 id）：只有它自己，降级交由调用方的模型链处理
+        """
+        llm = self._config.llm
+        if model_tier == "default":
+            chain = [llm.default_model, *(llm.default_fallback_models or [])]
+        elif model_tier == "reasoning":
+            chain = [llm.reasoning_model, *(llm.reasoning_fallback_models or [])]
+        else:
+            chain = [model_tier]
+        # 去空、去重且保持顺序（配置里同一模型可能既在主位又在兜底位）
+        seen: set[str] = set()
+        out: list[str] = []
+        for m in chain:
+            if m and m not in seen:
+                seen.add(m)
+                out.append(m)
+        return out or [model_tier]
+
     # ── API key resolution ──────────────────────────────────────────────────
 
     def _provider_for_model(self, model: str) -> str | None:
         """Return the *provider* group a model belongs to.
 
+        * ``modelscope`` → models listed in ``config.llm.modelscope_models``
+          （显式白名单，优先于其它规则：模型 id 也含 ``deepseek`` 前缀）
         * ``zhipu`` → ``glm-*``（智谱 BigModel，OpenAI 兼容端点）
-        * ``siliconflow`` → models listed in the news_digest model chain
-          (哪怕模型 id 含 ``deepseek`` 子串，也按 siliconflow 路由，因为
-           它由硅基流动托管、走其 openai 兼容 base_url)
-        * ``deepseek`` → models containing ``deepseek`` or ``deepseek/`` prefix
-          (仅指 DeepSeek 原生网关模型)
+        * ``deepseek`` → ``deepseek/...`` 命名空间（DeepSeek 原生网关 id 约定）
+        * ``siliconflow`` → ``config.llm.siliconflow_models`` 白名单，或出现在
+          任一插件模型链里的模型（哪怕 id 含 ``deepseek`` 子串，如
+          ``deepseek-ai/DeepSeek-R1-0528-Qwen3-8B``，因为它由硅基流动托管）
+        * ``deepseek``（剩余）→ 其它含 ``deepseek`` 子串的模型
         * otherwise ``None``
         """
+        llm = self._config.llm
+        # ModelScope 白名单优先：DeepSeek-V4.1-Flash 的 id 里有 deepseek，
+        # 若按子串判定会被错路由到 DeepSeek 原生网关（api.deepseek.com 无此模型）。
+        if model in (llm.modelscope_models or []):
+            return "modelscope"
         # 智谱优先判定：glm-* 即使出现在 news_digest/radar 链里也走 zhipu
         if model.startswith("glm-"):
             return "zhipu"
-        llm = self._config.llm
-        chain = [llm.news_digest_model, *(llm.news_digest_fallback_models or [])]
-        if model in chain:
+        # DeepSeek 原生的 id 命名空间是 deepseek/…（硅基/魔搭用 deepseek-ai/…）。
+        # 必须早于「在链里就算硅基」的判定：deepseek/deepseek-v4-flash 现在同时
+        # 出现在 default 与 market_pulse 链里，但它只能在原生网关调用。
+        if model.startswith("deepseek/"):
+            return "deepseek"
+        if model in (llm.siliconflow_models or []):
+            return "siliconflow"
+        chains = [
+            [llm.news_digest_model, *(llm.news_digest_fallback_models or [])],
+        ]
+        if any(model in c for c in chains):
             return "siliconflow"
         if "deepseek" in model:
             return "deepseek"
@@ -339,15 +420,19 @@ class LLMGateway:
     def _get_api_key(self, model: str) -> str | None:
         """Return the API key required for *model*, or ``None``.
 
+        * Models in the ModelScope whitelist → ModelScope token
         * Models containing ``deepseek`` → DeepSeek key
         * Models starting with ``gpt-``, ``o1``, or ``o3`` → OpenAI key
         * Models containing ``claude`` → Anthropic key
         * Models in the siliconflow chain → SiliconFlow key
         * Everything else → ``None`` (relies on environment / litellm defaults)
         """
-        if self._provider_for_model(model) == "zhipu":
+        provider = self._provider_for_model(model)
+        if provider == "modelscope":
+            return self._config.secrets.modelscope_api_key
+        if provider == "zhipu":
             return self._config.secrets.zhipu_api_key
-        if self._provider_for_model(model) == "siliconflow":
+        if provider == "siliconflow":
             return self._config.secrets.siliconflow_api_key
         if "deepseek" in model:
             return self._config.secrets.deepseek_api_key

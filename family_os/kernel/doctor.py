@@ -30,8 +30,8 @@ _REQUIRED_MODULES = (
 )
 
 _LLM_KEY_FIELDS = (
-    "deepseek_api_key", "openai_api_key", "anthropic_api_key",
-    "siliconflow_api_key", "zhipu_api_key",
+    "modelscope_api_key", "deepseek_api_key", "openai_api_key",
+    "anthropic_api_key", "siliconflow_api_key", "zhipu_api_key",
 )
 
 
@@ -108,7 +108,8 @@ def _check_llm(config) -> list[dict]:
                       "已配置：" + ", ".join(f.replace("_api_key", "").upper() for f in present))]
     return [_item("llm_key", False,
                   "未配置任何 provider 的 API Key，请在 .env 中设置 "
-                  "ZHIPU_API_KEY / SILICONFLOW_API_KEY / DEEPSEEK_API_KEY 之一")]
+                  "MODELSCOPE_API_KEY / ZHIPU_API_KEY / SILICONFLOW_API_KEY / "
+                  "DEEPSEEK_API_KEY 之一")]
 
 
 def _check_schedules(config) -> list[dict]:

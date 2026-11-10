@@ -143,7 +143,7 @@ class TestModelRouting:
         assert gateway._resolve_model("gpt-4-turbo") == "gpt-4-turbo"
 
     def test_provider_for_model_siliconflow_chains(self, store):
-        """strategy_radar/news_digest 模型链上的模型（含 deepseek 子串的 R1）→ siliconflow。"""
+        """news_digest 模型链上的模型（含 deepseek 子串的 R1）→ siliconflow。"""
         from family_os.kernel.llm_gateway import LLMGateway
 
         cfg = Config(
@@ -151,9 +151,6 @@ class TestModelRouting:
                 news_digest_model="Qwen/Qwen3-8B",
                 news_digest_fallback_models=["Qwen/Qwen3.5-4B",
                                              "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"],
-                strategy_radar_model="Qwen/Qwen3-8B",
-                strategy_radar_fallback_models=["deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
-                                                "Qwen/Qwen3.5-4B"],
             ),
             plugins=PluginConfig(), scheduler=SchedulerConfig(),
             notifier=NotifierConfig(), digest=DigestConfig(),
@@ -161,7 +158,7 @@ class TestModelRouting:
         )
         gw = LLMGateway(store, cfg)
 
-        # strategy_radar 链主模型 + 降级模型全部路由到 siliconflow
+        # news_digest 链的主模型 + 降级模型全部路由到 siliconflow
         assert gw._provider_for_model("Qwen/Qwen3-8B") == "siliconflow"
         assert gw._provider_for_model("Qwen/Qwen3.5-4B") == "siliconflow"
         # R1-0528 虽含 deepseek 子串，但由硅基流动托管 → siliconflow
@@ -289,6 +286,102 @@ class TestSiliconflowThinking:
         assert kwargs["custom_llm_provider"] == "openai"
         assert kwargs["api_base"] == "https://api.siliconflow.cn/v1"
         assert "extra_body" not in kwargs
+
+
+# ── ModelScope（2026-11-10 起的主 provider）──────────────────────────────────
+
+_MS_BASE = "https://api-inference.modelscope.cn/v1"
+_MS_MODEL = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+
+
+class TestModelScopeProvider:
+    """ModelScope 魔搭推理 API：默认模型 + 旧 provider 按序降级。
+
+    坑：模型 id 也含 ``deepseek``，若按子串判定会被错路由到 DeepSeek 原生网关
+    （api.deepseek.com 没有这个模型）。故 provider 判定用显式白名单。
+    """
+
+    @staticmethod
+    def _gw(store, **llm_kwargs) -> LLMGateway:
+        kwargs = dict(
+            default_model=_MS_MODEL,
+            default_fallback_models=["glm-4.7-flash", "deepseek/deepseek-v4-flash"],
+            news_digest_model=_MS_MODEL,
+            news_digest_fallback_models=["glm-4.7-flash", "Qwen/Qwen3-8B"],
+            modelscope_models=[_MS_MODEL],
+            providers={
+                "modelscope": {"base_url": _MS_BASE,
+                               "api_key_env": "MODELSCOPE_API_KEY"},
+                "zhipu": {"base_url": "https://open.bigmodel.cn/api/paas/v4",
+                          "api_key_env": "ZHIPU_API_KEY"},
+                "siliconflow": {"base_url": "https://api.siliconflow.cn/v1",
+                                "api_key_env": "SILICONFLOW_API_KEY"},
+            },
+        )
+        kwargs.update(llm_kwargs)
+        cfg = Config(
+            app=AppConfig(), llm=LLMConfig(**kwargs),
+            plugins=PluginConfig(), scheduler=SchedulerConfig(),
+            notifier=NotifierConfig(), digest=DigestConfig(),
+            approval=ApprovalConfig(),
+            secrets=Secrets(_env_file=None, modelscope_api_key="ms-test",
+                            zhipu_api_key="sk-test",
+                            siliconflow_api_key="sk-sf"),
+        )
+        return LLMGateway(store, cfg)
+
+    def test_modelscope_wins_over_deepseek_substring(self, store):
+        """白名单优先：同含 deepseek 前缀也必须判给 modelscope。"""
+        gw = self._gw(store)
+        assert gw._provider_for_model(_MS_MODEL) == "modelscope"
+        # 旧行为不能被破坏：硅基托管的 R1 仍归 siliconflow
+        cfg_chain = gw._config.llm.news_digest_fallback_models
+        assert "Qwen/Qwen3-8B" in cfg_chain
+        assert gw._provider_for_model("Qwen/Qwen3-8B") == "siliconflow"
+        assert gw._provider_for_model("deepseek/deepseek-v4-flash") == "deepseek"
+
+    def test_ask_uses_modelscope_endpoint(self, store, fake_litellm):
+        gw = self._gw(store)
+        gw.ask("hi")
+        kwargs = fake_litellm.completion.call_args.kwargs
+        assert kwargs["model"] == _MS_MODEL
+        assert kwargs["custom_llm_provider"] == "openai"
+        assert kwargs["api_base"] == _MS_BASE
+        assert kwargs["api_key"] == "ms-test"
+        # 思考开关交给模型默认（reasoning_content 与 content 并存）
+        assert "extra_body" not in kwargs
+        assert kwargs["timeout"] == 120
+
+    def test_empty_content_raises_so_chain_degrades(self, store, fake_litellm):
+        """HTTP 200 但 content 为空 → 抛错，交给上层模型链降级。"""
+        gw = self._gw(store)
+        fake_litellm.completion.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content="  "))],
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        with pytest.raises(RuntimeError, match="ModelScope"):
+            gw.ask("hi", model_tier=_MS_MODEL)
+
+    def test_default_tier_falls_back_in_order(self, store, fake_litellm):
+        """default 档：ModelScope 失败 → 依次降级到旧 provider，成功即止。"""
+        gw = self._gw(store)
+        fail = RuntimeError("modelscope 502")
+        ok = MagicMock(
+            choices=[MagicMock(message=MagicMock(content="兜底回答"))],
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        # 第 1 次（modelscope）失败，第 2 次（glm-4.7-flash）成功
+        fake_litellm.completion.side_effect = [fail, ok]
+
+        assert gw.ask("hi") == "兜底回答"
+        assert fake_litellm.completion.call_count == 2
+        assert fake_litellm.completion.call_args.kwargs["model"] == "glm-4.7-flash"
+
+    def test_candidate_models_dedup_and_order(self, store):
+        """链去空去重且保序；显式模型 id 只有自己一个候选。"""
+        gw = self._gw(store, default_fallback_models=[_MS_MODEL, "", "glm-4.7-flash"])
+        assert gw._candidate_models("default") == [_MS_MODEL, "glm-4.7-flash"]
+        assert gw._candidate_models("glm-4.7-flash") == ["glm-4.7-flash"]
 
 
 # ── PII Sanitization ──────────────────────────────────────────────────────────

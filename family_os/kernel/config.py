@@ -26,8 +26,11 @@ class AppConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM provider settings."""
 
-    default_model: str = "gpt-4o-mini"
-    reasoning_model: str = "gpt-4o"
+    default_model: str = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    reasoning_model: str = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    # default / reasoning 档位的降级链（2026-11-10 起：ModelScope 主，旧 provider 按序兜底）
+    default_fallback_models: list[str] = []
+    reasoning_fallback_models: list[str] = []
     monthly_budget_usd: float = 10.0
     cache_enabled: bool = True
     cache_ttl_hours: int = 24
@@ -36,6 +39,12 @@ class LLMConfig(BaseModel):
     model_pricing: dict = {}
     # 附加 LLM provider（如硅基流动），含 base_url / api_key_env
     providers: dict = {}
+    # 由 ModelScope 推理 API 托管的模型 id 清单。provider 判定用它做**显式白名单**，
+    # 不能靠模型 id 前缀猜——`deepseek-ai/DeepSeek-V4.1-Flash-1017`（ModelScope）与
+    # `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B`（硅基流动）前缀相同、托管方不同。
+    modelscope_models: list[str] = []
+    # 由硅基流动托管的模型 id 白名单（同上，显式优于按链猜测）
+    siliconflow_models: list[str] = []
     # 每日新闻解读插件专用模型链（免费模型，配 model_pricing 0 价）
     news_digest_model: str = "Qwen/Qwen3-8B"
     news_digest_fallback_models: list[str] = []
@@ -147,6 +156,8 @@ class Secrets(BaseSettings):
     siliconflow_api_key: str | None = None
     # 智谱 BigModel（glm-4.7-flash / glm-4-flash-250414 为 0 价免费模型）
     zhipu_api_key: str | None = None
+    # ModelScope 魔搭推理 API（2026-11-10 起为主 provider，OpenAI 兼容端点）
+    modelscope_api_key: str | None = None
     wechat_family_url: str | None = None
     wechat_invest_url: str | None = None
     # Server酱（ServerChan Turbo）SendKey：家庭群消息镜像到个人微信

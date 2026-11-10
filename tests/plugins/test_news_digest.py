@@ -1479,25 +1479,33 @@ class TestRecentSelectedTopics:
         assert res["selected"] == [], "普通信号无保底：LLM 空选时不得强制补入"
         assert res["select_mode"] == "empty"
 
-    def test_mandatory_indicators_force_included(self, tmp_path):
-        """必须关注指标是「无保底」的例外：LLM 空选也要入选（2026-11-05 用户要求）。
+    def test_mandatory_indicators_told_to_model_not_injected(self, tmp_path):
+        """2026-11-10 重构：必选项**只告知、不代插**。
 
-        美国非农/CPI/FOMC、中国社融·信贷/CPI/PPI/PMI、LPR 是黄金与股市的直接输入，
-        命中即强制入选；普通会议/文件仍不保底。
+        旧行为是精选后由代码把命中指标的条目强行并入结果；副作用是模型看不到这些
+        条目 → 同一事件两家源一条被插入一条被精选 → 推送重复。
+        新契约：必选主题（含同主题的多个候选标题）写进提示词，由模型自己选；
+        模型两次都漏则记 note，**代码绝不代插**。
         """
         from family_os.plugins.news_digest import analyzer
 
         articles = [
             {"title": "中共中央政治局会议分析研究当前经济形势",
-             "source_name": "源", "summary": "部署经济工作", "published": "2026-10-10"},
+             "source_name": "源", "summary": "部署经济工作", "published": "2026-11-09"},
             {"title": "美联储宣布降息25个基点",
-             "source_name": "源", "summary": "联邦基金利率下调", "published": "2026-10-10"},
+             "source_name": "源", "summary": "联邦基金利率下调", "published": "2026-11-09"},
             {"title": "统计局：9月份CPI同比上涨0.4%",
-             "source_name": "源", "summary": "居民消费价格温和上涨", "published": "2026-10-10"},
+             "source_name": "国家统计局", "summary": "居民消费价格温和上涨",
+             "published": "2026-11-09"},
+            {"title": "9月居民消费价格同比上涨0.4%",
+             "source_name": "中新网", "summary": "CPI 同比 0.4%",
+             "published": "2026-11-09"},
         ]
+        prompts: list[str] = []
 
         class PickNone:
             def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
+                prompts.append(prompt)
                 if "精选" in prompt:
                     return '{"items":[],"note":"均与近期重复"}'
                 if "输出 JSON" in prompt:
@@ -1506,13 +1514,56 @@ class TestRecentSelectedTopics:
 
         res = analyzer.run_pipeline(_mk_ctx(tmp_path, PickNone()), articles, {},
                                     tmp_path)
+
+        select_prompts = [p for p in prompts if "精选" in p]
+        assert select_prompts, "必须有精选调用"
+        head = select_prompts[0]
+        # 提示词里必须点名必选主题，并给出同主题候选，让模型自己挑权威原文
+        assert "今日已命中的必选项" in head
+        assert "中国CPI" in head and "美国CPI" not in head, "只列今日真命中的主题"
+        assert "统计局" in head and "中新网" in head, "同主题多源都要列给模型"
+        # 模型两次都漏 → 不代插，宁缺毋滥
+        assert res["selected"] == [], "必选项不再由代码强行补入"
+        assert res["select_mode"] == "empty"
+        assert "漏选必选项" in (res.get("selected_note") or "")
+
+    def test_select_keeps_mandatory_when_model_obeys(self, tmp_path):
+        """模型按提示自己选出必选项时：各留一条、来源最权威那条胜出。"""
+        from family_os.plugins.news_digest import analyzer
+
+        articles = [
+            {"title": "统计局：9月份CPI同比上涨0.4%", "source_name": "国家统计局",
+             "summary": "CPI 同比 0.4%，较上月回落", "published": "2026-11-09"},
+            {"title": "9月我国CPI同比上涨0.4%", "source_name": "中新网",
+             "summary": "CPI 同比 0.4%", "published": "2026-11-09"},
+        ]
+        seen: list[str] = []
+
+        class ObeyOnce:
+            """第一次只挑了媒体源和一条重复，第二次补齐权威原文。"""
+            def ask(self, prompt, model_tier="default", plugin_name="unknown", **kw):
+                seen.append(prompt)
+                if "精选" not in prompt:
+                    return "解读"
+                if "需要修正" in prompt:
+                    return json.dumps({"items": [{
+                        "title": "统计局：9月份CPI同比上涨0.4%",
+                        "title_short": "9月CPI同比0.4%", "category": "指标",
+                        "summary": "CPI 同比 0.4%，较上月回落 0.1 个百分点",
+                        "reason": "物价走弱影响利率预期", "topic_key": "中国CPI",
+                    }], "note": ""}, ensure_ascii=False)
+                return json.dumps({"items": [{
+                    "title": "9月我国CPI同比上涨0.4%", "title_short": "9月CPI",
+                    "category": "指标", "summary": "CPI 同比 0.4%",
+                    "reason": "物价数据", "topic_key": "中国CPI",
+                }], "note": ""}, ensure_ascii=False)
+
+        res = analyzer.run_pipeline(_mk_ctx(tmp_path, ObeyOnce()), articles, {},
+                                    tmp_path)
         titles = [it["title"] for it in res["selected"]]
-        assert "美联储宣布降息25个基点" in titles, "利率决策必须入选"
-        assert "统计局：9月份CPI同比上涨0.4%" in titles, "CPI 必须入选"
-        assert "中共中央政治局会议分析研究当前经济形势" not in titles, \
-            "会议不在必选清单内，仍不保底"
-        assert all("必须关注指标" in it["reason"] for it in res["selected"])
-        assert res["select_mode"] == "llm", "必选指标把空选变成有选"
+        assert len(titles) == 1, f"同一指标只能留一条：{titles}"
+        assert "统计局" in titles[0], "重试后应换成最权威原文"
+        assert any("需要修正" in p for p in seen if "精选" in p)
 
     def test_meeting_registry_is_three_tuple_for_archive_only(self):
         """会议登记表降为三元组（正则/key/名），仅用于归档。"""
@@ -2935,25 +2986,66 @@ class TestMandatoryIndicators:
         assert scope.classify("美国9月非农就业新增25.4万人") == "indicator"
         assert scope.classify("新增信贷超预期，社融存量增速回升") == "indicator"
 
-    def test_merge_puts_mandatory_first_and_caps(self):
+    def test_order_and_cap_puts_mandatory_first(self):
+        """排序与截断：必选主题在前，上限 = max(3, 必选条数)，不新增条目。"""
         from family_os.plugins.news_digest import analyzer
 
-        arts = [
-            {"title": "美国9月非农就业新增25.4万人", "published": "2026-11-05",
-             "summary": "新增25.4万", "source_name": "源"},
-            {"title": "中国10月CPI同比上涨0.3%", "published": "2026-11-05",
-             "summary": "同比0.3%", "source_name": "源"},
-            {"title": "LPR报价连续三个月不变", "published": "2026-11-05",
-             "summary": "1年期3.0%", "source_name": "源"},
+        items = [
+            {"title": "某地举办智能家居产业博览会", "summary": "s"},
+            {"title": "中国10月CPI同比上涨0.3%", "summary": "同比0.3%"},
+            {"title": "李强签署国务院令公布某条例", "summary": "s"},
+            {"title": "美国9月非农就业新增25.4万人", "summary": "新增25.4万"},
+            {"title": "LPR报价连续三个月不变", "summary": "1年期3.0%"},
         ]
-        llm_items = [{"title": "LPR报价连续三个月不变", "summary": "s",
-                      "reason": "r", "category": "指标"}]
-        merged = analyzer._merge_mandatory(llm_items, arts)
-        titles = [i["title"] for i in merged]
-        assert "美国9月非农就业新增25.4万人" in titles
-        assert "中国10月CPI同比上涨0.3%" in titles
-        assert titles.count("LPR报价连续三个月不变") == 1, "同一标题不得重复"
-        assert merged[0]["reason"].startswith("必须关注指标")
+        out = analyzer._order_and_cap(items)
+        titles = [i["title"] for i in out]
+        assert len(out) == 3, "3 条必选项占满上限，2 条常规条目被截掉"
+        assert all(analyzer.scope.mandatory_label(t) for t in titles), \
+            "留下的必须都是必选主题（不是新插入，只是排序+截断）"
+        # 必选只有 1 条时，上限仍是 3，常规条目照常保留
+        few = analyzer._order_and_cap([items[2], items[1]])
+        assert len(few) == 2
+
+    def test_same_indicator_two_sources_merged(self):
+        """2026-11-10 事故回归：同日 10 月 CPI 被两家源推送两条（第2条与第5条）。
+
+        强制插入已移除，但模型仍可能把同一事件的两家源都选进来；这道代码去重
+        是最后保险：按指标身份合成一条，留下官方源那份（信息更全）。
+        """
+        from family_os.plugins.news_digest import analyzer
+
+        items = [
+            {"title": "2026年10月份我国CPI同比上涨0.7%",
+             "summary": "数说中国丨我国CPI同比上涨0.7%",
+             "source_name": "中国新闻网-财经"},
+            {"title": "2026年10月份居民消费价格同比上涨0.7%",
+             "summary": "10月CPI同比涨0.7%，较上月0.9%回落0.2个百分点，环比持平",
+             "source_name": "国家统计局"},
+        ]
+        merged = analyzer._dedup_same_topic(items)
+
+        cpi = [i for i in merged
+               if "CPI" in (i.get("title") or "")
+               or "消费价格" in (i.get("title") or "")]
+        assert len(cpi) == 1, f"同一 CPI 只能留一条，实际：{[i['title'] for i in cpi]}"
+        assert "居民消费价格" in merged[0]["title"]
+        assert "统计局" in (merged[0].get("source_name") or "")
+
+    def test_domain_exclusion_tcm(self):
+        """2026-11-10 用户点名：中医药题材不入选（含其国家级法规）。
+
+        《中医药传统知识保护条例》本是国务院令、能过 policy_doc，但对
+        创业/职业/投资没有可操作增量 → 排除；同时不能连带排掉「医药」整体。
+        """
+        from family_os.plugins.news_digest import scope
+
+        assert scope.classify("中医药传统知识保护条例",
+                              "国务院令第850号公布，自2027年1月1日起施行") is None
+        assert scope.classify("全国中医药大会在京召开") is None
+        assert scope.classify("中药材价格连续三个月上涨") is None
+        # 对照：纯指标稿不受影响；集采这类仍有产业含义的「医药」不被连坐
+        assert scope.classify("10月CPI同比上涨0.7%") == "indicator"
+        assert scope._DOMAIN_EXCLUDED_RE.search("第十一批国家药品集中带量采购开标") is None
 
     def test_market_impact_triggered_by_plain_indicator(self, tmp_path):
         """PMI/社融这类非利率指标也要触发「黄金与股市影响」。"""

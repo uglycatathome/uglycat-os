@@ -137,6 +137,8 @@ def run_pipeline(ctx: Context, articles: list[dict],
       ④ 筛选（_stage_select，独立调用）：LLM 从候选里选 ≤3 条，
          且每条必须**同时**通过 scope.classify 的确定性硬门槛
          （重要文件 / 重要会议 / 重要经济指标 / 产业大会），否则剔除；
+         命中必选指标的主题会**写进提示词**要求必须入选（同日多家源只留权威原文），
+         精选后只做漏选检测与一次纠正重试，**代码不再代插**（2026-11-10 重构）；
       ⑤ stage0~3：措辞提取/解码/历史对比/一句话建议（口径改为创业·职业·投资）；
       ⑥ 会议概要与措辞归档（命中登记表即入库，供后续对比）。
 
@@ -284,6 +286,7 @@ def _stage_dedup(ctx, articles,
     recent_block = _recent_block(recent_topics)
     if not recent_block:
         return None
+    dedup_block, _, _ = _mandatory_blocks(articles)
     listing = "\n".join(
         f"{i}. [{a.get('source_name', '')}] {a.get('title', '')}\n"
         f"   {(a.get('summary') or a.get('body') or '')[:100]}"
@@ -298,10 +301,13 @@ def _stage_dedup(ctx, articles,
         "②若某候选虽属同主题，但包含【重大实质新进展】（政策正式落地/细则出台/"
         "金额与范围明确/重要数据公布等），则【保留】，不剔除。\n"
         "③宁缺毋滥：只有确实同主题才剔除，拿不准就保留。\n"
+        "④命中「必选指标」的候选（见下方清单）**一律不得剔除**——月度数据每月"
+        "都同主题，但每月的新数值本身就是新进展。\n"
         "输出 JSON：{\"drop\":[{\"index\":3,\"topic_key\":\"房贷贴息\","
         "\"reason\":\"与近期《…》同主题且无新进展\"}]}；无需剔除则 {\"drop\":[]}。"
         "只输出 JSON，不要输出其他文字。\n"
-        f"{recent_block}\n"
+        f"{recent_block}"
+        f"{dedup_block}\n"
         f"## 今日候选新闻（index 从 0 起）\n{listing}"
         + _extra_rules("dedup")
     )
@@ -353,8 +359,8 @@ def _stage_dedup_parse(raw: str) -> set[int] | None:
 # 「今日无合格新闻」的理由；最终是否入选仍由 scope 硬门槛把关。
 SELECT_WINDOW = 20
 SCOPE_QUOTA = 30
-# 必须关注指标可突破常规 3 条上限（同日 CPI+PPI、社融+CPI 等叠加发布时）
-MANDATORY_HARD_CAP = 5
+# 精选常规上限 3 条；命中必选指标的主题不受此限（同日 CPI+PPI+社融 叠加发布时）
+SELECT_LIMIT = 3
 
 
 def _pick_select_candidates(articles: list[dict],
@@ -378,7 +384,11 @@ def _mandatory_items(articles: list[dict]) -> list[dict]:
     """从候选里挑出「必须关注指标」条目（时间倒序，同名指标只留一条）。
 
     2026-11-05：美国非农/CPI/FOMC、中国社融·信贷/CPI/PPI/PMI、LPR 这 8 项
-    是黄金与股市的直接输入，命中即必须入选——不交给 LLM 裁量。
+    是黄金与股市的直接输入。
+
+    2026-11-10 起**只用于两件事**：①把「今日命中的必选主题 + 同主题候选标题」
+    写进去重/精选提示词；②精选后检测有没有漏。**不再由代码把条目插进结果**——
+    强制插入会让模型看不见这些条，同日两家源的重复就是这么来的。
     """
     out: list[dict] = []
     seen: set[str] = set()
@@ -386,7 +396,7 @@ def _mandatory_items(articles: list[dict]) -> list[dict]:
                      reverse=True)
     for a in ordered:
         title = a.get("title") or ""
-        # 硬边界优先于「必选」：强制入选不能绕过 scope。2026-11-06 实测——
+        # 硬边界优先于「必选」：必选项也不能绕过 scope。2026-11-06 实测——
         # 台湾 CPI 就是从这里进来的（mandatory_label 曾把它判成「中国CPI」，
         # 而 scope.classify 因台港澳属地区口径返回 None，两边口径不一致）。
         if scope.classify(title, a.get("summary") or "") is None:
@@ -408,25 +418,163 @@ def _mandatory_items(articles: list[dict]) -> list[dict]:
     return out
 
 
-def _merge_mandatory(items: list[dict], articles: list[dict]) -> list[dict]:
-    """把必须关注指标并入精选结果：强制项在前，LLM 其余结果随后，按标题去重。
+_OFFICIAL_SOURCE_RE = re.compile(
+    r"统计局|国务院|中国政府网|人民银行|央行|财政部|发改委|证监会|"
+    r"人社部|商务部|海关|工信部|住建部|能源局|市场监管总局|金融监管总局|"
+    r"新华社|人民日报"
+)
 
-    上限放宽到 ``MANDATORY_HARD_CAP``——同日多项指标集中发布时（如 CPI 与 PPI
-    同时出、或社融叠加 CPI），常规 3 条装不下，而这些都是用户点名必看的。
+
+def _topic_signature(item: dict) -> str:
+    """给一条精选结果算「同一件事」的指纹，用于合并重复条。
+
+    2026-11-10 事故：同一天的 10 月 CPI 被推了两条——
+    「中新网·2026年10月份我国CPI同比上涨0.7%」（代码强制插入）
+    「统计局·2026年10月份居民消费价格同比上涨0.7%」（LLM 精选）
+    当时按标题字符串去重拦不住，推送里第 2 条与第 5 条完全重复。
+    现架构已改为「必选项只告知、不代插」，重复来源只剩模型自己选重；
+    这道代码去重作为最后一道保险保留（按指标身份合并，留更权威/更详细那份）。
+
+    指纹优先级：必选指标标签（中国CPI/美国CPI/中国PPI…）> 会议归档 key >
+    归一化标题（仅去空白与标点，**保留数字**，避免把「9月CPI」和「10月CPI」
+    误合并）。刻意**不**采信 LLM 自报的 `topic_key`：模型对多条不同新闻会给同一个
+    占位键（实测 `topic_key="k"` 连出 5 条），照它合并会把整张清单压成 1 条。
+    """
+    title = (item.get("title") or "").strip()
+    label = scope.mandatory_label(title)
+    if label:
+        return f"indicator:{label}"
+    key = _meeting_key_for(title)
+    if key:
+        return f"meeting:{key}"
+    return "title:" + re.sub(r"[\s，。、；：！？,.;:!?（）()【】\[\]《》\"'“”‘’-]+", "",
+                             title)
+
+
+def _prefer_new(new: dict, old: dict) -> bool:
+    """同一件事的两条里换不换：官方源优先，再看摘要长度（信息量）。"""
+    def rank(it: dict) -> tuple[int, int]:
+        src = f"{it.get('source_name') or ''} {it.get('source') or ''}"
+        return (0 if _OFFICIAL_SOURCE_RE.search(src) else 1,
+                -len((it.get("summary") or "").strip()))
+    return rank(new) < rank(old)
+
+
+def _dedup_same_topic(items: list[dict]) -> list[dict]:
+    """同一主题只留一条：保留首次出现的位置，内容换成更权威/更详细的那条。"""
+    out: list[dict] = []
+    pos: dict[str, int] = {}
+    for it in items or []:
+        sig = _topic_signature(it)
+        if sig not in pos:
+            pos[sig] = len(out)
+            out.append(it)
+            continue
+        keep = pos[sig]
+        if _prefer_new(it, out[keep]):
+            logger.info("同主题合并：%s ← 用更权威/更详细的来源替换",
+                        (it.get("title") or "")[:40])
+            out[keep] = it
+    return out
+
+
+# ── 必选项：告知模型，不再由代码强制插入（2026-11-10 重构）──────────────────
+# 旧做法（2026-11-05 起）是精选之后由代码把命中指标的条目**强行并入**结果。
+# 副作用：模型看不到这些条，于是同一事件的两家源（中新网 CPI + 统计局 CPI）
+# 一条来自强制插入、一条来自模型精选 → 推送里重复；而且强制插入的摘要更短、
+# 来源更弱，反而挤掉了模型手里更权威的原文。
+# 新做法：**只告知、不插入**
+#   ① 去重阶段：把已命中的必选项列给模型，要求不得剔除；
+#   ② 精选阶段：把「今日命中的必选题 + 同主题候选标题」列进提示词，要求主题
+#      一条都不能漏、同主题只选最权威原文；
+#   ③ 精选后只做**检测**：漏了就用纠正提示词重试一次（仍是模型自己输出），
+#      两次都漏则记录 warning + 写进 note，绝不代插。
+
+def _mandatory_blocks(articles: list[dict]) -> tuple[str, str, list[str]]:
+    """返回 (去重提示块, 精选提示块, 必选主题标签列表)。
+
+    精选块会把「同一主题的多个候选标题」一并列出——这是让模型自己挑权威原文
+    的关键，也是同日重复的根治点（而不是事后删一条）。
     """
     mandatory = _mandatory_items(articles)
-    if mandatory:
-        titles = {str(i.get("title") or "").strip() for i in mandatory}
-        rest = [i for i in (items or [])
-                if str(i.get("title") or "").strip() not in titles]
-        merged = (mandatory + rest)[:MANDATORY_HARD_CAP]
-    else:
-        merged = list(items or [])
-    # 短标题兜底：模型偶发不给 title_short，或条目来自强制入选项，统一补一次
-    for it in merged:
-        if not (it.get("title_short") or "").strip():
-            it["title_short"] = short_title(it.get("title") or "")
-    return merged
+    if not mandatory:
+        return "", "", []
+    by_label: dict[str, list[dict]] = {}
+    for a in articles or []:
+        label = scope.mandatory_label(a.get("title") or "")
+        if label:
+            by_label.setdefault(label, []).append(a)
+    lines = []
+    for it in mandatory:
+        label = it["topic_key"]
+        cands = by_label.get(label, [])[:3]
+        cand_txt = " / ".join(
+            f"《{short_title(c.get('title') or '', 28)}》"
+            f"（{c.get('source_name') or c.get('source') or '来源未知'}）"
+            for c in cands)
+        lines.append(f"- **{label}**：{cand_txt or '《' + it['title'] + '》'}")
+    labels = [it["topic_key"] for it in mandatory]
+
+    dedup_block = (
+        "\n\n## 今日命中必选指标的候选（**不得剔除**）\n"
+        "下列候选是用户点名必看的宏观指标，即使与近期主题同主题也要保留"
+        "（除非你判定它连数字都没更新）：\n"
+        + "\n".join(f"- {it['title']}（{it['topic_key']}）" for it in mandatory)
+    )
+    select_block = (
+        "\n【今日已命中的必选项（这些主题必须各入选 1 条）】\n"
+        + "\n".join(lines) + "\n"
+        "硬要求：\n"
+        "  ① 上面每个主题**一条都不能漏**——哪怕它读起来平淡、只是月度数据；\n"
+        "  ② 同一主题有多个来源时，**只保留最权威的原文那一条**"
+        "（政府网/统计局/央行/发改委/证监会官网 > 新华社 > 其他媒体转述），"
+        "其余来源的同主题稿一律不要重复选；\n"
+        "  ③ title 必须与原文标题一致（用于回链），不要自己改写。\n"
+    )
+    return dedup_block, select_block, labels
+
+
+def _mandatory_missing(items: list[dict], labels: list[str]) -> list[str]:
+    """模型输出里还缺哪些必选主题（按指标身份比对，而非标题字符串）。"""
+    covered = {scope.mandatory_label(it.get("title") or "") for it in (items or [])}
+    return [lb for lb in labels if lb not in covered]
+
+
+def _mandatory_weak_source(items: list[dict], labels: list[str],
+                           articles: list[dict]) -> list[str]:
+    """必选主题选到了媒体转述、而候选里明明有官方原文的，列出来要求改选。
+
+    今天那条重复的正面价值就在这里：官方原文（统计局）摘要更全、能回链原文；
+    媒体转述（中新网）往往只有一句话。提示词已要求「只选最权威原文」，
+    这里是漏做时的补充纠正（仍由模型自己重出，不代插）。
+    """
+    official: dict[str, list[str]] = {}
+    for a in articles or []:
+        lb = scope.mandatory_label(a.get("title") or "")
+        if not lb:
+            continue
+        src = f"{a.get('source_name') or ''} {a.get('source') or ''}"
+        if _OFFICIAL_SOURCE_RE.search(src):
+            official.setdefault(lb, []).append((a.get("title") or "").strip())
+    weak = []
+    for it in items or []:
+        lb = scope.mandatory_label(it.get("title") or "")
+        if lb not in labels or lb not in official:
+            continue
+        if (it.get("title") or "").strip() not in official[lb]:
+            weak.append(lb)
+    return weak
+
+
+def _order_and_cap(items: list[dict], limit: int = SELECT_LIMIT) -> list[dict]:
+    """必选主题排前、常规条目随后；上限 = max(3, 必选条数)。
+
+    只是**排序与截断**，不新增任何条目——入选权始终在模型手里。
+    """
+    mand, rest = [], []
+    for it in items or []:
+        (mand if scope.mandatory_label(it.get("title") or "") else rest).append(it)
+    return (mand + rest)[:max(limit, len(mand))]
 
 
 def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
@@ -441,12 +589,19 @@ def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
     进出口金额、贸易额这类数量新闻**（用户点名不够格）。
     LLM 输出后还要再过一道 scope.classify 确定性硬门槛，并回填「分类」标签。
 
+    必选项（非农/CPI/FOMC/社融/PPI/PMI/LPR）：今日命中的主题会连同**同主题的
+    多个候选标题**一起写进提示词，要求「主题一条都不能漏、同主题只选最权威原文」。
+    精选后只做检测：漏了用纠正提示词重试一次；两次都漏则记 error 写进 note——
+    **绝不代插**（2026-11-10 用户要求：强制项提前告知，后续阶段不再引入强制项）。
+
     返回 (items, note)：
       - items 为 list 表示解析成功（空 list=今日确无合格信号，note 给理由）；
       - items 为 None 表示解析失败，上层视为空选（不做凑数兜底，宁缺毋滥）。
     """
     if not articles:
         return [], ""
+    # 今日命中的必选项 → 写进提示词（只告知，不代插）
+    _, select_block, labels = _mandatory_blocks(articles)
     limited = "\n\n".join(
         f"[{a.get('source_name', '')}] {a.get('title', '')}\n"
         f"{(a.get('summary') or a.get('body') or '')[:150]}"
@@ -524,7 +679,8 @@ def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
         "输出 JSON：{\"items\":[{\"title\":\"...\",\"title_short\":\"...\","
         "\"category\":\"文件\",\"summary\":\"...\",\"reason\":\"...\","
         "\"topic_key\":\"...\"}],\"note\":\"...\"}。只输出 JSON，不要输出其他文字。\n"
-        f"## 当日新闻\n{limited}"
+        + select_block
+        + f"## 当日新闻\n{limited}"
         + _extra_rules("select")
     )
     try:
@@ -535,6 +691,10 @@ def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
             logger.warning("news_digest 精选解析失败，重试一次: %s", (raw or "")[:80])
             raw = _ask_with_fallback(ctx, prompt)
             items, note = _stage_select_parse(raw), _stage_select_note(raw)
+        if items is None:
+            # 两次都解析不出合法 JSON → 按解析失败处理（宁缺毋滥，不再由代码兜底）
+            logger.warning("news_digest 精选两次解析失败，按空选处理")
+            return None, note
         # 硬门槛：LLM 会自我合理化，必须再过 scope 的确定性判定，并回填分类标签
         if items:
             qualified = []
@@ -547,15 +707,49 @@ def _stage_select(ctx, articles) -> tuple[list[dict] | None, str]:
                 logger.warning("news_digest 精选剔除不合格条目 %d/%d",
                                len(items) - len(qualified), len(items))
             items = qualified
-        # 硬上限：无论模型输出多少，最多保留 3 条（默认 1 条由提示词约束）
-        if items is not None and len(items) > 3:
-            items = items[:3]
-        # 必须关注指标（非农/CPI/FOMC/社融/PPI/PMI/LPR）：命中即强制入选，
-        # 不受上面的 3 条上限与「宁缺毋滥」裁量约束（2026-11-05 用户要求）。
-        merged = _merge_mandatory(items or [], articles)
-        if items is None and not merged:
-            return None, note      # 解析失败且无必选指标 → 仍按失败处理
-        return merged, note
+        # 同一事件的多源重复（模型可能仍选两条）→ 按指标身份/会议 key/标题合一
+        items = _dedup_same_topic(items or [])
+        # 必选项只做检测：漏了/选到媒体转述，就用纠正提示词让模型**自己**改（绝不代插）
+        missing = _mandatory_missing(items, labels)
+        weak = _mandatory_weak_source(items, labels, articles)
+        if missing or weak:
+            logger.warning("news_digest 必选项需纠正：漏选 %s / 非权威源 %s → 重试",
+                           missing, weak)
+            fix_lines = ["\n\n## 上一次输出需要修正\n"]
+            if missing:
+                fix_lines.append(
+                    "你上一版漏掉了这些必选主题：" + "、".join(missing) + "，必须补上。\n")
+            if weak:
+                fix_lines.append(
+                    "这些主题你选的是媒体转述，请改用**最权威原文**（政府网/统计局/"
+                    "央行/发改委官网）：" + "、".join(weak) + "。\n")
+            fix_lines.append(
+                "请重新输出**完整** JSON：保留上一版已选对的条目，补上缺的、"
+                "换掉非权威源；同一主题只留一条，title 与原文一致。\n")
+            retry_prompt = prompt + "".join(fix_lines)
+            raw2 = _ask_with_fallback(ctx, retry_prompt)
+            items2 = _stage_select_parse(raw2)
+            if items2:
+                qualified2 = []
+                for it in items2:
+                    cat = scope.classify(it.get("title") or "",
+                                         it.get("summary") or "")
+                    if cat:
+                        qualified2.append({**it, "category": scope.label(cat)})
+                items = _dedup_same_topic(qualified2) or items
+                note = _stage_select_note(raw2) or note
+            still = _mandatory_missing(items, labels)
+            if still:
+                logger.error("news_digest 必选项两次仍未入选：%s（不代插，宁缺毋滥）",
+                             still)
+                note = f"{note}（漏选必选项：{'、'.join(still)}）".strip()
+        # 排序与截断：必选主题在前；上限 = max(3, 必选条数)
+        items = _order_and_cap(items or [])
+        # 短标题兜底：模型偶发不给 title_short
+        for it in items:
+            if not (it.get("title_short") or "").strip():
+                it["title_short"] = short_title(it.get("title") or "")
+        return items, note
     except Exception as e:  # noqa: PERF203
         logger.warning("news_digest 精选 LLM 调用失败: %s", str(e)[:120])
         return None, ""

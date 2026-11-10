@@ -33,8 +33,11 @@ class TestAppConfigDefaults:
 class TestLLMConfigDefaults:
     def test_defaults(self):
         cfg = LLMConfig()
-        assert cfg.default_model == "gpt-4o-mini"
-        assert cfg.reasoning_model == "gpt-4o"
+        # 2026-11-10 起默认模型为 ModelScope 托管的 DeepSeek-V4.1-Flash
+        assert cfg.default_model == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+        assert cfg.reasoning_model == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+        assert cfg.default_fallback_models == []
+        assert cfg.reasoning_fallback_models == []
         assert cfg.monthly_budget_usd == 10.0
         assert cfg.cache_enabled is True
         assert cfg.cache_ttl_hours == 24
