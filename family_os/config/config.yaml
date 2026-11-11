@@ -61,6 +61,16 @@ notifier:
       sendkey_env: "SERVERCHAN_SENDKEY"
       title_max_chars: 32
       max_desp_bytes: 20000
+      # 失败加固（2026-11-11）：单次超时 25s；仅连接/握手阶段失败重试 1 次，
+      # 读超时不重试（服务端可能已收单）。失败消息落 data/outbox/serverchan/ 待补发。
+      timeout_s: 25.0
+      connect_retries: 1
+      retry_delay_s: 1.0
+      outbox_max_age_hours: 24
+      outbox_max_attempts: 3
+      # 公开模板未配置 webhooks，故默认关闭告警；需要时先配置 webhooks 再改为 true。
+      alert_group: "family"
+      alert_enabled: false
 
 digest:
   schedule: "0 8 * * *"

@@ -72,6 +72,15 @@ class ChannelConfig(BaseModel):
     sendkey_env: str = "SERVERCHAN_SENDKEY"
     title_max_chars: int = 32
     max_desp_bytes: int = 20000
+    # 2026-11-11 加固：境外 VM → sctapi.ftqq.com 偶发 TLS 握手 >10s，旧 10s 超时
+    # 会静默丢消息。超时放宽 + 仅连接阶段重试 + 失败落 outbox 待补推 + 可见告警。
+    timeout_s: float = 25.0                # 单次请求总超时（原 10s）
+    connect_retries: int = 1               # 仅连接/握手阶段失败的重试次数
+    retry_delay_s: float = 1.0             # 重试间隔
+    outbox_max_age_hours: int = 24         # 超过该时长的待补推条目不再自动补（新闻会过期）
+    outbox_max_attempts: int = 3           # 单条自动补推上限，超过转 exhausted
+    alert_group: str = "family"            # 失败告警发到哪个企业微信群
+    alert_enabled: bool = True             # 同一天同一插件只告警一次
 
 
 class NotifierConfig(BaseModel):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -21,6 +23,7 @@ from family_os.kernel.config import (
     DigestConfig,
     ApprovalConfig,
 )
+from family_os.kernel import outbox
 from family_os.kernel.notifier import Notifier
 from family_os.kernel.skill import Result
 
@@ -739,3 +742,197 @@ class TestServerChanTitle:
     def test_falls_back_to_plugin_name(self):
         assert Notifier._serverchan_title("\n\n", fallback="health_check") \
             == "health_check"
+
+
+# ── Tests: Server酱加固（2026-11-11）────────────────────────────────────────
+# 事故：当日 08:04 境外 VM 到 sctapi.ftqq.com 的 TLS 握手超时，旧实现 10s 超时
+# + 「失败只记 warning 不重试」→ 个人微信消息永久静默丢失。
+
+
+class TestServerChanHardening:
+    """超时放宽 / 分类重试 / outbox 补推 / 可见告警。"""
+
+    @staticmethod
+    def _result(msg=FAMILY_MSG):
+        return Result(status="ok", data={"_messages": {"family": msg}})
+
+    @staticmethod
+    def _sc_no_retry(**extra):
+        ch = {"type": "serverchan", "enabled": True,
+              "connect_retries": 0, "retry_delay_s": 0.0}
+        ch.update(extra)
+        return [ch]
+
+    def test_channel_defaults(self):
+        ch = ChannelConfig(type="serverchan")
+        assert ch.timeout_s == 25.0
+        assert ch.connect_retries == 1
+        assert ch.outbox_max_age_hours == 24
+        assert ch.outbox_max_attempts == 3
+        assert ch.alert_enabled is True
+
+    def test_timeout_is_configurable_and_default_25s(self, temp_dir, mocker):
+        mock_post = _sc_ok(mocker)
+        Notifier(_sc_config(temp_dir)).send(self._result(), "market_pulse")
+        assert mock_post.call_args[1]["timeout"] == 25.0
+
+        mock_post.reset_mock()
+        n2 = Notifier(_sc_config(temp_dir, channels=[
+            {"type": "serverchan", "enabled": True, "timeout_s": 30.0}]))
+        n2.send(self._result(), "market_pulse")
+        assert mock_post.call_args[1]["timeout"] == 30.0
+
+    @pytest.mark.parametrize("exc", [
+        httpx.ConnectTimeout("connect timed out"),
+        httpx.ConnectError("_ssl.c:983: The handshake operation timed out"),
+        httpx.ReadTimeout("_ssl.c:983: The handshake operation timed out"),
+        httpx.PoolTimeout("pool exhausted"),
+    ])
+    def test_connect_phase_error_is_retried_and_recovers(
+            self, temp_dir, mocker, exc):
+        """连接/握手阶段失败 → 重试一次成功；SSL 握手超时被包成 ReadTimeout 也要重试。"""
+        resp = mocker.Mock(status_code=200, json=lambda: {"code": 0})
+        mock_post = mocker.patch("family_os.kernel.notifier.httpx.post",
+                                 side_effect=[exc, resp])
+        n = Notifier(_sc_config(temp_dir, channels=[
+            {"type": "serverchan", "enabled": True, "retry_delay_s": 0.0}]))
+        n.send(self._result(), "market_pulse")
+        assert mock_post.call_count == 2
+        assert not outbox.iter_entries(temp_dir), "重试成功不应留下 outbox 条目"
+
+    @pytest.mark.parametrize("exc", [
+        httpx.ReadTimeout("read timed out"),
+        httpx.WriteTimeout("write timed out"),
+    ])
+    def test_read_write_timeout_is_never_retried_and_marked_uncertain(
+            self, temp_dir, mocker, exc):
+        """读/写超时＝服务端可能已收单：绝不重试，落 uncertain 不自动补推。"""
+        mock_post = mocker.patch("family_os.kernel.notifier.httpx.post",
+                                 side_effect=exc)
+        n = Notifier(_sc_config(temp_dir, channels=self._sc_no_retry()))
+        n.send(self._result(), "market_pulse")
+        assert mock_post.call_count == 1
+        entries = outbox.iter_entries(temp_dir)
+        assert len(entries) == 1
+        assert entries[0][1]["status"] == "uncertain"
+
+    def test_quota_error_is_pending_not_uncertain(self, temp_dir, mocker):
+        """服务端明确拒绝（code!=0）＝确定未送达，可安全自动补推。"""
+        mocker.patch(
+            "family_os.kernel.notifier.httpx.post",
+            return_value=mocker.Mock(
+                status_code=200,
+                json=lambda: {"code": 40001, "message": "今日发送条数已达上限",
+                              "data": {"error": "ERR_LIMIT"}}))
+        n = Notifier(_sc_config(temp_dir, channels=self._sc_no_retry()))
+        n.send(self._result(), "market_pulse")
+        assert outbox.iter_entries(temp_dir)[0][1]["status"] == "pending"
+
+    def test_pending_entry_is_auto_flushed_on_next_send(self, temp_dir, mocker):
+        """下次推送前自动补推「确定未送达」的旧消息，成功后删除条目。"""
+        resp = mocker.Mock(status_code=200, json=lambda: {"code": 0})
+        mock_post = mocker.patch(
+            "family_os.kernel.notifier.httpx.post",
+            side_effect=[httpx.ConnectError("down"), resp, resp])
+        n = Notifier(_sc_config(temp_dir, channels=self._sc_no_retry()))
+        n.send(self._result(), "market_pulse")
+        assert len(outbox.iter_entries(temp_dir)) == 1
+        n.send(self._result(), "market_pulse")
+        assert mock_post.call_count == 3, "1 次失败 + 1 次补推 + 1 次当次推送"
+        assert not outbox.iter_entries(temp_dir)
+
+    def test_uncertain_entry_is_never_auto_flushed(self, temp_dir, mocker):
+        """uncertain 条目即使后续推送成功也不补发，避免重复推送。"""
+        resp = mocker.Mock(status_code=200, json=lambda: {"code": 0})
+        mock_post = mocker.patch(
+            "family_os.kernel.notifier.httpx.post",
+            side_effect=[httpx.ReadTimeout("read timed out"), resp])
+        n = Notifier(_sc_config(temp_dir, channels=self._sc_no_retry()))
+        n.send(self._result(), "market_pulse")
+        n.send(self._result(), "market_pulse")
+        assert mock_post.call_count == 2, "不应为 uncertain 条目自动补推"
+        assert outbox.iter_entries(temp_dir)[0][1]["status"] == "uncertain"
+
+    def test_failure_alert_is_sent_once_per_day_per_plugin(self, temp_dir, mocker):
+        """失败升级为可见告警，同一天同一插件只发一次（防刷屏）。"""
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append((url, kwargs))
+            if "sctapi.ftqq.com" in url:
+                raise httpx.ConnectError("down")
+            return mocker.Mock(status_code=200)
+
+        mocker.patch("family_os.kernel.notifier.httpx.post", side_effect=fake_post)
+        cfg = _sc_config(temp_dir, channels=self._sc_no_retry())
+        cfg._secrets = Secrets(
+            _env_file=None,
+            serverchan_sendkey=SENDKEY,
+            wechat_family_url="https://qyapi.weixin.qq.com/test?key=ALERTKEY",
+        )
+        n = Notifier(cfg)
+        n.send(self._result(), "market_pulse")
+        n.send(self._result(), "market_pulse")
+        alerts = [c for c in calls if "qyapi.weixin.qq.com" in c[0]]
+        assert len(alerts) == 1
+        assert "个人微信推送失败" in alerts[0][1]["json"]["markdown"]["content"]
+
+    def test_sendkey_never_leaks_into_outbox(self, temp_dir, mocker):
+        """httpx 异常里的完整 URL 含 SendKey，落盘前必须脱敏。"""
+        mocker.patch(
+            "family_os.kernel.notifier.httpx.post",
+            side_effect=httpx.ConnectError(
+                f"connection failed for url 'https://sctapi.ftqq.com/{SENDKEY}.send'"))
+        n = Notifier(_sc_config(temp_dir, channels=self._sc_no_retry()))
+        n.send(self._result(), "market_pulse")
+        raw = json.dumps(outbox.iter_entries(temp_dir)[0][1], ensure_ascii=False)
+        assert SENDKEY not in raw
+        assert "sctapi.ftqq.com" in raw  # 域名保留，便于排查
+
+    def test_flush_degrades_sending_residue_to_uncertain(self, temp_dir, mocker):
+        """补推中途崩溃残留的 sending 条目一律降级，不再自动重发。"""
+        sender = mocker.Mock()
+        p = outbox.enqueue(temp_dir, plugin="p", group="family", title="t",
+                           desp="d", reason="r")
+        e = json.loads(p.read_text(encoding="utf-8"))
+        e["status"] = "sending"
+        outbox.update(p, e)
+        stats = outbox.flush(temp_dir, sender)
+        assert stats["skipped_uncertain"] == 1
+        sender.assert_not_called()
+        assert json.loads(p.read_text(encoding="utf-8"))["status"] == "uncertain"
+
+    def test_flush_skips_expired_and_exhausted(self, temp_dir, mocker):
+        sender = mocker.Mock(return_value=(True, False, ""))
+        old = outbox.enqueue(temp_dir, plugin="p", group="family", title="old",
+                             desp="d", reason="r")
+        e = json.loads(old.read_text(encoding="utf-8"))
+        e["created_at"] = (datetime.now() - timedelta(hours=48)).isoformat()
+        outbox.update(old, e)
+        outbox.enqueue(temp_dir, plugin="p", group="family", title="done",
+                       desp="d", reason="r", attempts=3)
+        stats = outbox.flush(temp_dir, sender, max_age_hours=24, max_attempts=3)
+        assert stats["skipped_expired"] == 1
+        assert stats["exhausted"] == 1
+        sender.assert_not_called()
+
+    def test_summarize_contract_for_health_check(self, temp_dir):
+        clean = outbox.summarize(temp_dir)
+        assert clean["status"] == "ok" and clean["ok"] and not clean["issues"]
+        outbox.enqueue(temp_dir, plugin="news_digest", group="family",
+                       title="t", desp="d", reason="r")
+        outbox.enqueue(temp_dir, plugin="news_digest", group="family",
+                       title="u", desp="d", reason="r", uncertain=True)
+        dirty = outbox.summarize(temp_dir)
+        assert dirty["status"] == "issue"
+        assert any("待自动补推" in x for x in dirty["issues"])
+        assert any("状态不明" in x for x in dirty["issues"])
+
+    def test_connect_phase_classification(self):
+        f = Notifier._is_connect_phase_error
+        assert f(httpx.ConnectTimeout("x"))
+        assert f(httpx.ConnectError("x"))
+        assert f(httpx.PoolTimeout("x"))
+        assert f(httpx.ReadTimeout("_ssl.c:983: The handshake operation timed out"))
+        assert not f(httpx.ReadTimeout("read timed out"))
+        assert not f(httpx.WriteTimeout("write timed out"))

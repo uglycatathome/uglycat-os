@@ -36,7 +36,29 @@ SERVERCHAN_SENDKEY=SCT你的SendKey
 |---|---|---|
 | `SendKey 未配置` | `.env` 没读到变量 | 确认文件在仓库根目录、变量名无空格 |
 | `code != 0` | Server酱 返回错误 | 免费版每天 5 条上限，或 SendKey 失效 |
-| `HTTP 4xx` | 网络/接口异常 | 稍后重试，不影响本地文件输出 |
+| 连接超时 / `HTTP 4xx` | 网络或接口异常 | 连接阶段自动重试 1 次；仍失败进 outbox 待补发 |
+
+## 推送失败时会怎样
+
+失败不会中断主流程，本地 `data/inbox/` 一定有产物。2026-11-11 起的行为：
+
+- 单次请求超时 25s（`timeout_s` 可配）；连接/握手阶段失败重试 1 次
+  （`connect_retries`）。**读超时不重试**：服务端可能已收单，重发会重复推送。
+- 失败消息落到 `data/outbox/serverchan/*.json`，含标题、正文、原因与状态：
+  `pending` 在下次推送前自动补发；`uncertain` 只保留等人工确认；
+  `sending` 是补发中断的残留，一律降级为 `uncertain`；超过
+  `outbox_max_age_hours`（默认 24h）或 `outbox_max_attempts`（默认 3 次）不再自动补发。
+- 若配置了 `alert_group` 指向的 webhook 且 `alert_enabled: true`，失败时会发一条
+  告警（同日同插件去重）；本模板默认把该开关设为 `false`，告警不会触发。
+- `code != 0`（免费版每天 5 条用尽）是明确拒绝，会进 `pending` 等次日自动补发。
+
+手动处理：
+
+```bash
+./uglycat outbox list          # 查看待补推 / 待确认条目
+./uglycat outbox flush         # 立即补发确定未送达的条目
+./uglycat outbox confirm <id>  # 人工确认某条确实没收到后再补发（id 可用前缀）
+```
 
 ## 只想本地看
 

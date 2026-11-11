@@ -21,6 +21,8 @@ from pathlib import Path
 
 import httpx
 
+from family_os.kernel import outbox
+from family_os.kernel.logging_utils import redact_text
 from family_os.kernel.skill import Result
 
 if __name__ == "__main__":  # noqa: pragma: no cover
@@ -326,8 +328,11 @@ class Notifier:
 
         内容与 wechat 渠道同源（``_group_messages``）——群里发什么，个人微信就推什么。
         只镜像 ``channel.mirror_groups`` 列出的群（默认 family）；``skipped`` 静默
-        （与企业微信一致）。失败（免费版每天 5 条超额、SendKey 无效、网络抖动）
-        只记 warning，不重试、不抛出，也不影响其他渠道。
+        （与企业微信一致）。
+
+        2026-11-11 加固：每次推送前先自动补推 outbox 里「确定未送达」的历史消息；
+        本次推送失败则落 outbox + 发企业微信可见告警。任何失败都不抛出、不影响
+        其它渠道。
         """
         sendkey = getattr(self._config.secrets, channel.sendkey_env.lower(), None)
         if not sendkey:
@@ -353,53 +358,185 @@ class Notifier:
             )
             return
 
+        # 先补旧账：只补「确定未送达」的条目，uncertain 的一律不碰（防重复推送）。
+        self.flush_serverchan_outbox(channel)
+
         for group in groups:
             for msg in self._group_messages(result, plugin_name, group):
                 self._post_serverchan(sendkey, msg, channel,
                                       plugin_name=plugin_name, group=group)
 
+    # ── Server酱：超时 / 分类重试 / outbox / 告警（2026-11-11）─────────────
+
+    def _sc_channel(self):
+        """取当前启用的 serverchan 渠道配置（供 CLI 手动补推用）。"""
+        for ch in self._config.notifier.channels:
+            if ch.type == "serverchan" and ch.enabled:
+                return ch
+        return None
+
+    @staticmethod
+    def _is_connect_phase_error(exc: httpx.HTTPError) -> bool:
+        """请求**尚未到达服务端**的失败才可安全重试。
+
+        - ConnectTimeout / ConnectError / PoolTimeout：连接或连接池阶段，未发出请求。
+        - ReadTimeout / WriteTimeout / 其它：服务端可能已收单，**绝不重试**。
+        - 特例：TLS 握手超时（``_ssl.c:983: The handshake operation timed out``）
+          有时被 httpcore 包成 ReadTimeout，但握手发生在 POST body 之前，重试安全；
+          今早 08:04 的真实事故正是这一型。
+        """
+        if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError,
+                            httpx.PoolTimeout)):
+            return True
+        if isinstance(exc, httpx.TimeoutException):
+            msg = str(exc).lower()
+            if "handshake operation timed out" in msg or "_ssl.c" in msg:
+                return True
+        return False
+
+    def _sc_request(self, sendkey: str, title: str, desp: str,
+                    channel) -> tuple[bool, bool, str]:
+        """发一次 Server酱请求（含连接阶段重试）。
+
+        返回 ``(sent, uncertain, reason)``：
+
+        - ``uncertain=True``：请求可能已被服务端接收（读超时 / 非 200 / 响应异常），
+          调用方**不得重试或自动补推**，否则会重复推送。
+        - ``uncertain=False``：确定未送达（连接阶段失败、或服务端明确 ``code!=0``），
+          可以安全补推。
+
+        超时由 ``channel.timeout_s`` 控制（默认 25s，原 10s 太紧）；重试次数由
+        ``channel.connect_retries`` 控制，且只对连接阶段生效。
+        """
+        url = f"https://sctapi.ftqq.com/{sendkey}.send"
+        payload = {"title": title, "desp": desp}
+        timeout = float(getattr(channel, "timeout_s", 25.0))
+        attempts = 1 + max(0, int(getattr(channel, "connect_retries", 1)))
+        delay = max(0.0, float(getattr(channel, "retry_delay_s", 1.0)))
+
+        for i in range(attempts):
+            try:
+                resp = httpx.post(url, data=payload, timeout=timeout)
+            except httpx.HTTPError as exc:
+                reason = redact_text(f"{type(exc).__name__}: {exc}")
+                connect_phase = self._is_connect_phase_error(exc)
+                if connect_phase and i < attempts - 1:
+                    logger.warning(
+                        "[serverchan] 连接阶段失败（%s），%.1fs 后重试 %d/%d",
+                        reason, delay, i + 1, attempts - 1)
+                    if delay:
+                        time.sleep(delay)
+                    continue
+                return False, not connect_phase, reason
+
+            # ── 从这里起请求已被服务端接收：一律不重试 ──────────────────
+            if resp.status_code != 200:
+                return False, True, f"HTTP {resp.status_code}"
+            try:
+                body = resp.json()
+            except ValueError:
+                return False, True, "响应非 JSON"
+            if body.get("code") != 0:
+                data = body.get("data") or {}
+                return (False, False,
+                        f"code={body.get('code')} message={body.get('message')} "
+                        f"error={data.get('error')}（免费版每天限 5 条）")
+            return True, False, ""
+        return False, True, "连接阶段重试耗尽"
+
     def _post_serverchan(self, sendkey: str, markdown: str, channel,
                          plugin_name: str = "", group: str = "") -> bool:
         """把一条 Markdown 消息推到 Server酱；成功返回 ``True``。
 
-        ``title`` 取消息首行（去 markdown 符号，≤ ``title_max_chars``），``desp`` 为
-        全文（≤ ``max_desp_bytes``）。网络错误 / 非 200 / 返回 ``code != 0``
-        （如免费版每日 5 条用尽）一律记 warning 后返回 False，绝不抛出。
+        失败一律记 warning、落 ``data/outbox/serverchan/``、发企业微信告警，
+        但绝不抛出（不能影响其它渠道）。
         """
-        url = f"https://sctapi.ftqq.com/{sendkey}.send"
-        payload = {
-            "title": self._serverchan_title(
-                markdown, channel.title_max_chars, fallback=plugin_name),
-            "desp": self._safe_trim(markdown, max_bytes=channel.max_desp_bytes),
-        }
+        title = self._serverchan_title(
+            markdown, channel.title_max_chars, fallback=plugin_name)
+        desp = self._safe_trim(markdown, max_bytes=channel.max_desp_bytes)
+        sent, uncertain, reason = self._sc_request(sendkey, title, desp, channel)
+        if sent:
+            logger.info("[serverchan] 已镜像到个人微信（群=%s plugin=%s）：%s",
+                        group or "-", plugin_name, title)
+            return True
+
+        reason = redact_text(reason)
+        kind = "可能已送达，不自动补推" if uncertain else "未送达，已入待补推队列"
+        logger.warning("[serverchan] 推送失败（%s）plugin=%s: %s",
+                       kind, plugin_name, reason)
         try:
-            resp = httpx.post(url, data=payload, timeout=10.0)
-        except httpx.HTTPError as exc:
-            logger.warning("[serverchan] 推送失败（网络）plugin=%s: %s",
-                           plugin_name, exc)
-            return False
-        if resp.status_code != 200:
-            logger.warning("[serverchan] 推送失败（HTTP %s）plugin=%s",
-                           resp.status_code, plugin_name)
-            return False
+            path = outbox.enqueue(
+                self._config.app.data_dir, plugin=plugin_name,
+                group=group or "family", title=title, desp=desp,
+                reason=reason, uncertain=uncertain)
+            logger.warning("[serverchan] 已存 outbox：%s", path.name)
+        except OSError as exc:
+            logger.warning("[serverchan] outbox 落盘失败（%s），仅剩告警与日志", exc)
+        self._alert_serverchan_failure(channel, plugin_name,
+                                       group or "family", reason, uncertain)
+        return False
+
+    def _alert_serverchan_failure(self, channel, plugin_name: str, group: str,
+                                  reason: str, uncertain: bool) -> None:
+        """把失败升级为**手机上可见**的告警：发到企业微信群。
+
+        warning 只落 journald（用户看不到），健康周报又要等周六；这里直接推群。
+        同一天同一插件只告警一次（marker 文件），避免网络持续抖动刷屏；
+        未补推条目仍会在健康周报里持续提示。告警自身失败也只记 warning。
+        """
+        if not getattr(channel, "alert_enabled", True):
+            return
+        d = outbox.outbox_dir(self._config.app.data_dir)
         try:
-            body = resp.json()
-        except ValueError:
-            logger.warning("[serverchan] 推送失败（响应非 JSON）plugin=%s: %s",
-                           plugin_name, resp.text[:120])
-            return False
-        if body.get("code") != 0:
-            data = body.get("data") or {}
-            logger.warning(
-                "[serverchan] 推送失败（code=%s message=%s error=%s）plugin=%s "
-                "—— 免费版每天限 5 条，超额需次日再推",
-                body.get("code"), body.get("message"), data.get("error"),
-                plugin_name,
-            )
-            return False
-        logger.info("[serverchan] 已镜像到个人微信（群=%s plugin=%s）：%s",
-                    group or "-", plugin_name, payload["title"])
-        return True
+            d.mkdir(parents=True, exist_ok=True)
+            marker = d / (f".alerted_{datetime.now().strftime('%Y%m%d')}_"
+                          f"{outbox._safe(plugin_name)}")
+            if marker.exists():
+                return
+            marker.touch()  # 先落标记再发，避免告警自身失败造成风暴
+        except OSError as exc:
+            logger.warning("[serverchan] 告警去重标记写入失败: %s", exc)
+            return
+
+        url = self._resolve_webhook_url(getattr(channel, "alert_group", "family"))
+        if not url:
+            return
+        action = ("可能已送达，请先在手机确认，勿重复补推"
+                  if uncertain else
+                  "将在下次推送自动补推；也可手动执行 `run.py outbox flush`")
+        text = (
+            f"## ⚠️ 个人微信推送失败\n"
+            f"> {datetime.now().strftime('%m-%d %H:%M')}\n"
+            f"**插件**：{plugin_name}（群 {group}）\n"
+            f"**原因**：{reason[:160]}\n"
+            f"**处理**：{action}\n"
+            f"消息已存入 `data/outbox/serverchan/`，健康周报会持续提示。")
+        if not self._post_webhook(url, text):
+            logger.warning("[serverchan] 失败告警未能发出（企业微信 webhook 异常）")
+
+    def flush_serverchan_outbox(self, channel=None) -> dict:
+        """补推 outbox 中所有「确定未送达」的消息（自动补推 + CLI 手动入口）。"""
+        channel = channel or self._sc_channel()
+        if channel is None:
+            return {"error": "serverchan 渠道未启用"}
+        sendkey = getattr(self._config.secrets, channel.sendkey_env.lower(), None)
+        if not sendkey:
+            return {"error": "Server酱 SendKey 未配置"}
+
+        def _sender(title, desp):
+            return self._sc_request(sendkey, title, desp, channel)
+
+        try:
+            stats = outbox.flush(
+                self._config.app.data_dir, _sender,
+                max_age_hours=int(getattr(channel, "outbox_max_age_hours", 24)),
+                max_attempts=int(getattr(channel, "outbox_max_attempts", 3)))
+        except Exception as exc:  # noqa: BLE001 — 绝不因补推影响主流程
+            logger.warning("[serverchan] outbox 补推异常: %s", exc)
+            return {"error": str(exc)}
+        if any(stats.get(k) for k in ("sent", "failed", "exhausted")):
+            logger.info("[serverchan] outbox 补推结果: %s", stats)
+        return stats
 
     @staticmethod
     def _serverchan_title(markdown: str, max_chars: int = 32,

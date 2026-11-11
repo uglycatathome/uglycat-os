@@ -39,6 +39,7 @@ except Exception:  # noqa: BLE001 — 脱敏失败不应阻断 CLI 启动
 # Sub-command groups
 schedule_app = typer.Typer(help="Manage scheduled jobs")
 inbox_app = typer.Typer(help="Read inbox messages")
+outbox_app = typer.Typer(help="个人微信推送补推队列（Server酱）")
 review_app = typer.Typer(help="Review pending decisions")
 cost_app = typer.Typer(help="Cost reporting")
 fact_app = typer.Typer(help="Manage facts")
@@ -46,6 +47,7 @@ ingest_app = typer.Typer(help="Ingest data")
 
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(inbox_app, name="inbox")
+app.add_typer(outbox_app, name="outbox")
 app.add_typer(review_app, name="review")
 app.add_typer(cost_app, name="cost")
 app.add_typer(fact_app, name="fact")
@@ -282,6 +284,63 @@ def schedule_daemon():
     while not stop.is_set():
         stop.wait(1.0)
     typer.echo("Scheduler daemon stopped.")
+
+
+# ── family outbox（个人微信漏推补发，2026-11-11）─────────────────────────────
+
+
+@outbox_app.command("list")
+def outbox_list():
+    """列出待补推 / 待人工确认的消息（含状态与原因）。"""
+    from family_os.kernel import outbox as sc_outbox
+
+    cfg = _get_config()
+    entries = sc_outbox.iter_entries(cfg.app.data_dir)
+    if not entries:
+        typer.echo("outbox 为空，无漏推消息。")
+        return
+    for path, e in entries:
+        typer.echo(
+            f"{e.get('status', '?'):<10} {e.get('created_at', '')} "
+            f"[{e.get('id', '')}] {e.get('plugin', '')} | {e.get('title', '')} | "
+            f"attempts={e.get('attempts', 0)} | {e.get('reason', '')[:80]}")
+        typer.echo(f"           {path.name}")
+
+
+@outbox_app.command("flush")
+def outbox_flush():
+    """立即补推所有「确定未送达」的消息；uncertain 条目不自动发（防重复）。"""
+    from family_os.kernel import outbox as sc_outbox
+    from family_os.kernel.notifier import Notifier
+
+    cfg = _get_config()
+    stats = Notifier(cfg).flush_serverchan_outbox()
+    typer.echo(f"补推结果: {stats}")
+    for x in sc_outbox.summarize(cfg.app.data_dir)["issues"]:
+        typer.echo(f"⚠️ {x}")
+
+
+@outbox_app.command("confirm")
+def outbox_confirm(entry_id: str):
+    """人工确认某条 uncertain 消息确实没收到 → 转待补推并立即补发。
+
+    ``entry_id`` 可用完整 id 或 id 前缀（见 `outbox list`）。
+    """
+    from family_os.kernel import outbox as sc_outbox
+
+    cfg = _get_config()
+    matched = [(p, e) for p, e in sc_outbox.iter_entries(cfg.app.data_dir)
+               if str(e.get("id", "")).startswith(entry_id)]
+    if not matched:
+        typer.echo(f"未找到 id 以 {entry_id!r} 开头的条目")
+        raise typer.Exit(1)
+    for p, e in matched:
+        e["status"] = "pending"
+        e["attempts"] = 0
+        e["reason"] = "人工确认未收到，转为待补推"
+        sc_outbox.update(p, e)
+    typer.echo(f"已确认 {len(matched)} 条，执行补推…")
+    outbox_flush()
 
 
 # ── family inbox ──────────────────────────────────────────────────────────────
